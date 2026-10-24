@@ -1,2 +1,4 @@
 # written by scripts/serve.ps1 while it runs
 .server.pid
+# Visual Studio editor state
+.vs/
