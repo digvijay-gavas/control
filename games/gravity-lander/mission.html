@@ -476,11 +476,6 @@ function startFrom(i) {
 }
 const SLOTS = [...PHASES.keys(), READY];
 function reached() { return SLOTS.filter(i => checkpoints[i]); }
-function chooseCheckpoint() {
-  Pad.submenu("Choose checkpoint", SLOTS.map(i => checkpoints[i]
-    ? { label: (done[i === READY ? PHASES.length - 1 : i] ? "✓ " : "") + cpName(i) + (i === 0 ? " (launch pad)" : ""), action: () => startFrom(i) }
-    : { label: `🔒 ${cpName(i)}: not reached yet`, keepOpen: true, action: () => {} }));
-}
 function loadSaved() {
   try { checkpoints = JSON.parse(localStorage.getItem(ALL_KEY) || "[]") || []; } catch (e) { checkpoints = []; }
   try { checkpoint = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
@@ -1055,9 +1050,7 @@ function render(p) {
       [`Score ${S.score}`, 26, "#ffb547", 800],
       ["A or B: choose a checkpoint · fly again", 18, "#3ddc84", 700],
     ]);
-  } else if (state === "pause") {
-    // the Pad menu is drawn on top
-  }
+  } else if (state === "pause") Launcher.draw(ctx, W, H, screen);
 }
 
 // ---------- start screens (launcher.js) ----------
@@ -1072,17 +1065,17 @@ function checkpointScreen() {
       : { slot: i, label: cpName(i), status: "locked", note: "Not reached yet" };
   });
   if (done[PHASES.length - 1]) items.push({ label: `Mission complete · best score ${best}`, status: "info" });
-  items.push({ label: "Settings", note: "Assists, auto-land, unlimited fuel, sound", action: () => { screen = settingsScreen(); } });
+  items.push({ label: "Settings", note: "Assists, auto-land, unlimited fuel, sound", action: () => { screen = settingsScreen(checkpointScreen); } });
   items.push({ label: "← Back: choose mode", note: "Landing practice or the orbit mission", action: () => { location.href = "./"; } });
   return { title: "ORBIT MISSION", sel: Math.max(0, items.findIndex(it => it.slot === titleCp)),
     lines: ["Terra → Luna with real orbital mechanics. Start from any checkpoint you've reached.",
             "Time warp (LB/RB) only speeds up game time · L3 auto-land · Start menu in flight"], items };
 }
-function settingsScreen() {
+function settingsScreen(backTo) {
   return Launcher.settingsScreen({
     toggleAssist, toggleAutoLand, toggleFuel, togglePath: () => {},
     tune: () => { assist = true; saveSettings(); Assist.open(); },
-    back: () => { screen = checkpointScreen(); },
+    back: () => { screen = backTo(); },
     getAssist: () => assist, getAutoLand: () => autoLand, getFuel: () => infFuel, getPath: () => Launcher.settings.showPath,
   });
 }
@@ -1092,29 +1085,41 @@ function screenBack() {
   else screen = checkpointScreen();
 }
 function showCheckpoints() { state = "title"; screen = checkpointScreen(); }
-Launcher.attach(() => state === "title" && !Assist.isOpen() ? screen : null, screenBack);
+function pauseScreen() {
+  return { title: "PAUSED", sel: 0,
+    lines: [`Assignment ${Math.min(S.phase + 1, PHASES.length)}: ${PHASES[Math.min(S.phase, PHASES.length - 1)].name} · T+ ${fmtTime(S.t)} · score ${S.score}`],
+    hint: "D-pad / stick ▲▼ choose · A select · B, Start or Back: resume",
+    items: [
+      { label: "Resume", action: resume },
+      { label: "Retry from last checkpoint", action: () => { if (loadCheckpoint()) state = "play"; } },
+      { label: "Choose checkpoint", note: "Any checkpoint you've reached", action: showCheckpoints },
+      { label: "Restart mission", note: "From the launch pad", action: () => startFrom(0) },
+      { label: "Settings", note: "Assists, auto-land, unlimited fuel, sound, PID tuning", action: () => { screen = settingsScreen(pauseScreen); } },
+      { label: "Main menu", note: "Landing practice or the orbit mission", action: () => { location.href = "./"; } },
+      { label: "Back to hub", action: () => { location.href = "../../"; } },
+    ] };
+}
+
+// Start / Back (or Esc) in flight pauses with this menu; again (or B) resumes
+let pausedFrom = "play";
+function openPause() { pausedFrom = state; state = "pause"; screen = pauseScreen(); Pad.stopRumble(); }
+function resume() { state = pausedFrom; }
+function goBack() {
+  if (state !== "pause") return screenBack();
+  if (screen.title === "PAUSED") resume(); else screen = pauseScreen();   // settings: back to the pause menu
+}
+Launcher.attach(() => (state === "title" || state === "pause") && !Assist.isOpen() ? screen : null, goBack);
+window.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || Assist.isOpen()) return;
+  if (state === "pause" || state === "title") goBack(); else openPause();
+});
 
 // ---------- main loop ----------
 Pad.setup({
   title: "Orbit Mission",
   hubUrl: "../../",
-  items: [
-    { label: "Resume", action: () => {} },
-    { label: "Load last checkpoint", action: () => { if (loadCheckpoint()) state = "play"; } },
-    { label: "Choose checkpoint…", keepOpen: true, action: chooseCheckpoint },
-    { get label() { return `Auto-land: ${autoLand ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleAutoLand },
-    { label: "Restart mission", action: () => { newMission(); state = "play"; } },
-    { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
-    { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
-    { label: "Tune attitude assist (PID)", action: () => { assist = true; saveSettings(); Assist.open(); } },
-    { label: "Main menu (mode, checkpoints, settings)", action: showCheckpoints },
-    { label: "Landing practice", action: () => { location.href = "./#practice"; } },
-  ],
-  canOpen: () => !Assist.isOpen(),
-  onMenu: open => {
-    if (open && state === "play") state = "pause";
-    else if (!open && state === "pause") state = "play";
-  },
+  items: [],
+  canOpen: () => false,   // this page has its own menus (launcher.js): start screens and pause
 });
 
 newMission(false);
@@ -1125,9 +1130,13 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   let p = Pad.poll();
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
-  if (p.connected && state !== "pause") {
+  const menuBtn = p.pressed[B.START] || p.pressed[B.BACK];
+  if (state === "pause") { if (menuBtn) resume(); else if (!Assist.isOpen()) Launcher.handle(p, screen, goBack); }
+  else if (menuBtn && state !== "title") openPause();
+  else if (p.connected) {
     if (state === "title") {
-      if (!Assist.isOpen()) Launcher.handle(p, screen, screenBack);
+      if (p.pressed[B.BACK]) goBack();
+      else if (!Assist.isOpen()) Launcher.handle(p, screen, goBack);
     } else if (state === "crashed") {
       if (p.pressed[B.A]) { loadCheckpoint(); state = "play"; }
       else if (p.pressed[B.B]) showCheckpoints();

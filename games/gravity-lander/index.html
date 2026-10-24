@@ -482,7 +482,7 @@ function drawHUD(p) {
   ctx.fillText(autoLand
     ? "Auto-land: stick ◀▶ drifts toward a spot · RT adds thrust · L3 auto-land off · B fuel ∞ · Start menu"
     : assist
-    ? "RT throttle · Left stick tilt · L3 auto-land · X assist off · Y path · B fuel ∞ · Start menu (PID tuning)"
+    ? "RT throttle · Left stick tilt · L3 auto-land · X assist off · Y path · B fuel ∞ · Start: pause / settings"
     : "RT throttle · Left stick rotate · LT auto-level · X assist on · Y path · B fuel ∞ · Start menu", W - 16, H - 16);
   const deg = a => Math.round(-a * 180 / Math.PI);   // positive = leaning right
   const err = Math.abs(Math.atan2(Math.sin(L.target - L.th), Math.cos(L.target - L.th))) * 180 / Math.PI;
@@ -598,11 +598,6 @@ try { unlocked = clamp(parseInt(localStorage.getItem(WORLD_KEY), 10) || 1, 1, WO
 try { landed = JSON.parse(localStorage.getItem(LANDED_KEY) || "[]") || []; } catch (e) {}
 for (let i = 0; i < unlocked - 1; i++) landed[i] = true;   // unlocking the next world means you landed here
 function flyTo(i) { total = 0; newLevel(i, 0); state = "play"; screen = null; }
-function chooseWorld() {
-  Pad.submenu("Choose world", WORLDS.map((w, i) => i < unlocked
-    ? { label: `${landed[i] ? "✓ " : ""}${w.name} · g ${w.g} m/s²`, action: () => flyTo(i) }
-    : { label: `🔒 ${w.name}: land on ${WORLDS[i - 1].name} first`, keepOpen: true, action: () => {} }));
-}
 
 // ---------- start screens (launcher.js) ----------
 // Choose the mode, then a world (or a mission checkpoint, on mission.html), or settings
@@ -641,29 +636,40 @@ function screenBack() {
   else if (screen.title === "LANDING PRACTICE") screen = modeScreen();
   else screen.items[screen.items.length - 1].action();   // settings: its own Back
 }
-Launcher.attach(() => state === "title" && !Assist.isOpen() ? screen : null, screenBack);
+function pauseScreen() {
+  return { title: "PAUSED", sel: 0,
+    lines: [`${world.name}${round ? ` (round ${round + 1})` : ""} · score ${total}`],
+    hint: "D-pad / stick ▲▼ choose · A select · B, Start or Back: resume",
+    items: [
+      { label: "Resume", action: resume },
+      { label: "Restart this world", action: () => { newLevel(levelIdx, round); state = "play"; } },
+      { label: "Choose world", note: "Any world you've reached", action: () => { state = "title"; screen = worldsScreen(); } },
+      { label: "Settings", note: "Assists, auto-land, unlimited fuel, sound, PID tuning", action: () => { screen = settings(pauseScreen); } },
+      { label: "Main menu", note: "Landing practice or the orbit mission", action: () => { state = "title"; screen = modeScreen(); } },
+      { label: "Back to hub", action: () => { location.href = "../../"; } },
+    ] };
+}
+
+// Start / Back (or Esc) in flight pauses with this menu; again (or B) resumes
+let pausedFrom = "play";
+function openPause() { pausedFrom = state; state = "pause"; screen = pauseScreen(); Pad.stopRumble(); }
+function resume() { state = pausedFrom; }
+function goBack() {
+  if (state !== "pause") return screenBack();
+  if (screen.title === "PAUSED") resume(); else screen = pauseScreen();   // settings: back to the pause menu
+}
+Launcher.attach(() => (state === "title" || state === "pause") && !Assist.isOpen() ? screen : null, goBack);
+window.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || Assist.isOpen()) return;
+  if (state === "pause" || state === "title") goBack(); else openPause();
+});
 
 // ---------- main loop ----------
 Pad.setup({
   title: "Gravity Lander",
   hubUrl: "../../",
-  items: [
-    { label: "Resume", action: () => {} },
-    { label: "Restart this world", action: () => { newLevel(levelIdx, round); state = "play"; } },
-    { label: "Start over from the Moon", action: () => { total = 0; newLevel(0, 0); state = "play"; } },
-    { label: "Choose world…", keepOpen: true, action: chooseWorld },
-    { label: "Main menu (mode, worlds, settings)", action: () => { state = "title"; screen = modeScreen(); } },
-    { get label() { return `Auto-land: ${autoLand ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleAutoLand },
-    { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
-    { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
-    { label: "Tune attitude assist (PID)", action: () => { assist = true; saveSettings(); Assist.open(); } },
-    { label: "Orbit mission (Terra → Luna)", action: () => { location.href = "mission.html"; } },
-  ],
-  canOpen: () => !Assist.isOpen(),
-  onMenu: open => {
-    if (open && state === "play") state = "pause";
-    else if (!open && state === "pause") state = "play";
-  },
+  items: [],
+  canOpen: () => false,   // this page has its own menus (launcher.js): start screens and pause
 });
 
 newLevel(0, 0);
@@ -674,8 +680,15 @@ function frame(now) {
   let p = Pad.poll();
   // The tuning panel takes the buttons; the flight keeps running on sticks and triggers
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
-  if (p.connected && state !== "pause") {
-    if (state === "title") { if (!Assist.isOpen()) Launcher.handle(p, screen, screenBack); update(dt, p); }
+  const menuBtn = p.pressed[B.START] || p.pressed[B.BACK];
+  if (state === "pause") { if (menuBtn) resume(); else if (!Assist.isOpen()) Launcher.handle(p, screen, goBack); }
+  else if (menuBtn && state !== "title") openPause();
+  else if (p.connected) {
+    if (state === "title") {
+      if (p.pressed[B.BACK]) goBack();
+      else if (!Assist.isOpen()) Launcher.handle(p, screen, goBack);
+      update(dt, p);
+    }
     else if (state === "result" && p.pressed[B.A]) {
       if (result.ok) { const n = levelIdx + 1; newLevel(n % WORLDS.length, round + (n >= WORLDS.length ? 1 : 0)); }
       else newLevel(levelIdx, round);
@@ -685,6 +698,7 @@ function frame(now) {
     else update(dt, p);
   } else if (state === "title") update(dt, p);
   render(p);
+  if (state === "pause") Launcher.draw(ctx, W, H, screen);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
