@@ -16,6 +16,7 @@
 <a id="hub" href="../../">← Hub</a>
 <script src="../../shared/pad.js"></script>
 <script src="assist.js"></script>
+<script src="lander.js"></script>
 <script>
 // Orbit Mission: launch from Terra, reach orbit, transfer to Luna, get
 // captured, settle into lunar orbit and land. Each step is a checkpoint.
@@ -25,16 +26,19 @@
 //               let go and the PID keeps that heading · assist off: thrusters directly
 //   D-pad       hold ▲ prograde · ▼ retrograde · ▶ radial out · ◀ radial in (press again to release)
 //   X           attitude assist on/off · Y separate stage · B unlimited fuel on/off
+//   L3          auto-land on/off (press the left stick in until it clicks; also in the Start menu)
+//               takes over below the radar altitude while descending
 //   LB / RB     time warp slower / faster (game time only)
 //   A           view: Rocket → Orbit map → Terra–Luna system · right stick zoom (R3 resets)
-//   Start/Back  menu: load checkpoint, restart, unlimited fuel, PID tuning, hub
+//   Start/Back  menu: choose any checkpoint you've reached, restart, unlimited fuel, PID tuning, hub
 //
 // Physics, in SI units: Newton's gravity from both bodies at once (Luna moves on
 // a fixed circular orbit), thrust along the nose, mass loss from the rocket
 // equation, drag in Terra's exponential atmosphere. Time warp only makes game
 // time pass faster; the integrator takes smaller steps so the orbits stay exact.
 // The worlds are scaled down (like Kerbal Space Program) so a two-stage rocket
-// can make the trip.
+// can make the trip. Both have terrain, and touchdown is a rigid-body contact
+// (lander.js): the legs are shock absorbers, so a bad landing can bounce, slide or tip over.
 
 const cv = document.getElementById("c");
 const ctx = cv.getContext("2d");
@@ -54,10 +58,20 @@ const TERRA = { name: "Terra", R: 600e3, mu: 3.5316e12, atmo: 70e3, rho0: 1.225,
 const LUNA = { name: "Luna", R: 200e3, mu: 6.5138e10, a: 12e6, color: "#9a9ca3" };
 LUNA.n = Math.sqrt(TERRA.mu / LUNA.a ** 3);
 LUNA.soi = LUNA.a * Math.pow(LUNA.mu / TERRA.mu, 0.4);
+LUNA.g = LUNA.mu / LUNA.R ** 2; TERRA.g = TERRA.mu / TERRA.R ** 2;
+TERRA.seed = 11; LUNA.seed = 23;
 const STAGES = [
   { name: "Booster", dry: 3000, fuel: 20000, thrust: 440e3, isp: 300, alpha: 0.5, area: 8 },
   { name: "Lander", dry: 2000, fuel: 3000, thrust: 40e3, isp: 330, alpha: 1.5, area: 5 },
 ];
+// Contact points of each stack in metres from the centre of mass: a along the nose,
+// b to the side. With the booster it stands on the booster's fins; the lander alone
+// stands on its legs (3.2 m out, 1.6 m below). GYRS: radius of gyration for spin inertia.
+const CRAFT_PTS = [
+  [{ a: -6.8, b: 3.2, foot: true }, { a: -6.8, b: -3.2, foot: true }, { a: -5.6, b: 2 }, { a: -5.6, b: -2 }, { a: 2.4, b: 2 }, { a: 2.4, b: -2 }, { a: 6, b: 0 }],
+  [{ a: -1.6, b: 3.2, foot: true }, { a: -1.6, b: -3.2, foot: true }, { a: -0.4, b: 2 }, { a: -0.4, b: -2 }, { a: 2.4, b: 2 }, { a: 2.4, b: -2 }, { a: 6, b: 0 }],
+];
+const GYRS = [4, 2];
 const WARPS = [1, 2, 4, 10, 50, 100, 1000, 10000];
 const PHASE0 = 70 * Math.PI / 180;   // Luna's starting angle
 
@@ -72,18 +86,81 @@ const PHASES = [
     done: s => s.dom === LUNA && s.el.e < 1 && s.el.ra < LUNA.soi * 0.9 && s.el.pe > 3e3 },
   { name: "Stable lunar orbit", goal: "Make it round: periapsis above 10 km and apoapsis below 500 km.",
     done: s => s.dom === LUNA && s.el.e < 1 && s.el.pe > 10e3 && s.el.ap < 500e3 },
-  { name: "Land on Luna", goal: "Burn retrograde to slow down, then touch down below 3 m/s, upright. LT gives fine throttle.",
+  { name: "Land on Luna", goal: "Burn retrograde to slow down, then touch down gently (the legs take 4 m/s), upright, on ground that isn't too steep. L3 auto-land can fly the descent.",
     done: s => s.landedOn === LUNA },
 ];
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
 
+// ---------- terrain ----------
+// Smooth noise around each body, from 40 km hills down to 20 m bumps. Some regions
+// are smooth plains (easy landing), others rough. Terra is flat around the launch pad.
+const OCTAVES = [[40e3, 1200], [8e3, 250], [2e3, 60], [400, 16], [80, 5], [20, 1.2]];
+function hash(i, seed) {
+  let h = Math.imul(i ^ Math.imul(seed, 0x9e3779b1), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise(u, cells, seed) {   // u in [0, 1) once round the body; wraps seamlessly
+  const x = u * cells, i = Math.floor(x), f = x - i, w = f * f * (3 - 2 * f);
+  const a = hash(i % cells, seed), b = hash((i + 1) % cells, seed);
+  return (a + (b - a) * w) * 2 - 1;
+}
+function terrainH(body, ang) {
+  const u = ((ang / (2 * Math.PI)) % 1 + 1) % 1, C = 2 * Math.PI * body.R;
+  // 0.15 on smooth plains up to 2.55 in rough highlands (slopes there reach about 30°)
+  const n = 0.5 + 0.5 * noise(u, Math.round(C / 25e3), body.seed + 50), rough = 0.15 + 2.4 * n * n;
+  let h = 0;
+  OCTAVES.forEach(([wl, amp], k) => { h += noise(u, Math.round(C / wl), body.seed + k) * amp * (k >= 2 ? rough : 1); });
+  if (body === TERRA) {
+    const d = clamp((Math.abs(wrap(ang - Math.PI / 2)) * body.R - 500) / 20e3, 0, 1);
+    h *= d * d * (3 - 2 * d);
+  }
+  return h;
+}
+// Ground under a world point, for the contact model: depth, slope normal, ground velocity
+function groundBelow(body, wx, wy) {
+  const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+  const dx = wx - bx, dy = wy - by, r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+  const pen = body.R + terrainH(body, ang) - r;
+  if (pen <= 0) return null;
+  const ds = 0.5, dh = (terrainH(body, ang + ds / body.R) - terrainH(body, ang - ds / body.R)) / (2 * ds);
+  const ux = dx / r, uy = dy / r;
+  let nx = ux + dh * uy, ny = uy - dh * ux;
+  const l = Math.hypot(nx, ny); nx /= l; ny /= l;
+  return { pen: pen / l, nx, ny, gvx: bvx, gvy: bvy };
+}
+// Contact points of the current stack, as world offsets from the centre of mass
+function craftPoints() {
+  const nx = Math.cos(S.th), ny = Math.sin(S.th);
+  return CRAFT_PTS[S.stage].map(q => ({ x: q.a * nx - q.b * ny, y: q.a * ny + q.b * nx, foot: !!q.foot }));
+}
+// Radar altitude: the lowest foot's height above the ground below it
+function clearance() {
+  const body = dominant(S.x, S.y, S.t), [bx, by] = body === LUNA ? lunaPos(S.t) : [0, 0];
+  let alt = Infinity;
+  for (const q of craftPoints()) if (q.foot) {
+    const wx = S.x + q.x - bx, wy = S.y + q.y - by;
+    alt = Math.min(alt, Math.hypot(wx, wy) - body.R - terrainH(body, Math.atan2(wy, wx)));
+  }
+  return { body, alt };
+}
+// Put a landed craft on the ground where it stands (feet just touching)
+function placeOnGround() {
+  const body = S.landedOn, [bx, by] = body === LUNA ? lunaPos(S.t) : [0, 0];
+  const ux = S.landOff[0], uy = S.landOff[1], l = Math.hypot(ux, uy), ang = Math.atan2(uy, ux);
+  const r = body.R + terrainH(body, ang) - CRAFT_PTS[S.stage][0].a;
+  S.landOff = [ux / l * r, uy / l * r]; S.th = ang;
+  S.x = bx + S.landOff[0]; S.y = by + S.landOff[1];
+}
+
 // ---------- state ----------
 let state = "title", S, warpIdx = 0, mapView = false, zoomMul = 1, assist = true, hold = null;
 // view: 0 rocket (flight), 1 orbit map around the body you're near, 2 whole Terra–Luna system
 const VIEWS = ["Rocket", "Orbit map", "Terra–Luna system"];
 let aiming = false;   // assist on and the stick is pointing somewhere
+let autoLand = false, autoActive = false, autoInfo = null;   // L3: autopilot flies the descent
 let view = 0, viewNote = 0, warpNote = null;
 
 // Unlimited fuel: a practice switch shared with landing mode. Tanks never drain;
@@ -97,15 +174,24 @@ function toggleFuel() {
   if (infFuel && S) for (let i = S.stage; i < STAGES.length; i++) S.fuel[i] = STAGES[i].fuel;
   Pad.setup({});   // refresh the menu label
 }
+function toggleAutoLand() {
+  autoLand = !autoLand;
+  if (autoLand) { assist = true; hold = null; }
+  Assist.pid.reset();
+  Lander.voice.event(autoLand ? "autoOn" : "autoOff");
+  Pad.setup({});
+}
 let pred = { pts: [], lunaPts: [], enc: null, at: 0 }, banner = null, parts = [], debris = [];
 
 function newMission(save = true) {
   S = {
     t: 0, x: 0, y: TERRA.R, vx: 0, vy: 0, th: Math.PI / 2, om: 0, target: Math.PI / 2,
     stage: 0, fuel: [STAGES[0].fuel, STAGES[1].fuel], landedOn: TERRA, landOff: [0, TERRA.R],
-    phase: 0, score: 0, thr: 0, crashed: null, best: {},
+    phase: 0, score: 0, thr: 0, crashed: null, best: {}, mem: [], settle: 0, impact: 0,
   };
+  placeOnGround();
   warpIdx = 0; hold = null; Assist.pid.reset(); debris = []; parts = []; banner = null; lastDom = TERRA;
+  Lander.voice.reset(0);
   if (save) saveCheckpoint();
 }
 
@@ -169,16 +255,17 @@ function elements(s, body) {
 // fixed steps. Under time warp the orbit takes steps of a second or more, which
 // would make the PID overshoot further each step and set the craft spinning.
 const ROT_DT = 1 / 120;
-function rotate(dt, manualAlpha, maxAlpha) {
-  if (manualAlpha === 0) { S.th = wrap(S.th + S.om * dt); return; }   // free spin
+// extra: angular acceleration from ground contact
+function rotate(dt, manualAlpha, maxAlpha, extra = 0) {
+  if (manualAlpha === 0 && !extra) { S.th = wrap(S.th + S.om * dt); return; }   // free spin
   const n = Math.ceil(dt / ROT_DT - 1e-9), h = dt / n;
   for (let i = 0; i < n; i++) {
     const err = wrap(S.target - S.th);
-    if (manualAlpha === null && Math.abs(err) < 1e-5 && Math.abs(S.om) < 1e-5) {
+    if (manualAlpha === null && !extra && Math.abs(err) < 1e-5 && Math.abs(S.om) < 1e-5) {
       // Settled: stay on target for the rest of this step (no need to keep integrating)
       S.th = S.target; S.om = 0; return;
     }
-    const alpha = manualAlpha === null ? Assist.pid.update(err, S.om, h, maxAlpha) : manualAlpha;
+    const alpha = (manualAlpha === null ? Assist.pid.update(err, S.om, h, maxAlpha) : manualAlpha) + extra;
     S.om += alpha * h; S.th = wrap(S.th + S.om * h);
   }
 }
@@ -191,16 +278,27 @@ function stepPhysics(dt, ctl) {
   const F = st.thrust * thr;
   S.thr = thr;
 
-  // Attitude: PID holds a heading, or the stick drives the thrusters directly
+  // Ground contact near the surface: legs, hull and friction (lander.js)
+  let ct = null, cl = null;
+  if (!S.landedOn) {
+    cl = clearance();
+    if (cl.alt < 20) ct = Lander.contact(S, craftPoints(), m, (wx, wy) => groundBelow(cl.body, wx, wy), S.mem);
+  }
+
+  // Attitude: PID holds a heading, or the stick drives the thrusters directly.
+  // With both legs down the thrusters stop fighting the ground.
   const maxAlpha = st.alpha * (STAGES[S.stage].dry + STAGES[S.stage].fuel + (S.stage === 0 ? STAGES[1].dry + STAGES[1].fuel : 0)) / m;
   if (!S.landedOn) {
-    if (assist && hold) { const dir = holdDir(); if (dir !== null) S.target = dir; }
-    rotate(dt, assist ? null : -ctl.turn * maxAlpha, maxAlpha);
+    const resting = ct && ct.feet >= 2;
+    if (resting) { S.target = S.th; Assist.pid.reset(); }
+    else if (assist && hold) { const dir = holdDir(); if (dir !== null) S.target = dir; }
+    rotate(dt, resting ? 0 : assist ? null : -ctl.turn * maxAlpha, maxAlpha, ct ? ct.tq / (m * GYRS[S.stage] ** 2) : 0);
   }
 
   // Translation: gravity + thrust + drag (semi-implicit Euler with small steps)
   accel(S.x, S.y, S.vx, S.vy, S.t, tmp);
   let ax = tmp.ax + Math.cos(S.th) * F / m, ay = tmp.ay + Math.sin(S.th) * F / m;
+  if (ct) { ax += ct.fx / m; ay += ct.fy / m; }
   if (tmp.rho > 0) {
     const v = Math.hypot(S.vx, S.vy), k = 0.5 * tmp.rho * 0.4 * st.area * v / m;
     ax -= k * S.vx; ay -= k * S.vy;
@@ -216,7 +314,7 @@ function stepPhysics(dt, ctl) {
     // Acceleration relative to the body (Luna itself is accelerating around Terra)
     const bax = body === LUNA ? -LUNA.n * LUNA.n * bx : 0, bay = body === LUNA ? -LUNA.n * LUNA.n * by : 0;
     if ((ax - bax) * ux + (ay - bay) * uy > 0.05 && F > 0) {
-      S.landedOn = null;
+      S.landedOn = null; S.mem = []; S.settle = 0; S.impact = 0;
       S.vx = bvx + ux * 0.5; S.vy = bvy + uy * 0.5;
     } else {
       S.x = bx + S.landOff[0]; S.y = by + S.landOff[1]; S.vx = bvx; S.vy = bvy;
@@ -228,28 +326,74 @@ function stepPhysics(dt, ctl) {
   S.x += S.vx * dt; S.y += S.vy * dt;
   S.t += dt;
 
-  // Ground contact
-  for (const body of [TERRA, LUNA]) {
-    const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
-    const dx = S.x - bx, dy = S.y - by, r = Math.hypot(dx, dy);
-    if (r > body.R) continue;
-    const ux = dx / r, uy = dy / r, rvx = S.vx - bvx, rvy = S.vy - bvy;
-    const down = -(rvx * ux + rvy * uy), side = Math.abs(rvx * -uy + rvy * ux);
-    const tilt = Math.abs(wrap(S.th - Math.atan2(uy, ux)));
-    if (down < 3 && side < 2 && tilt < 15 * Math.PI / 180) {
-      S.landedOn = body; S.landOff = [ux * body.R, uy * body.R]; S.om = 0;
-      S.x = bx + S.landOff[0]; S.y = by + S.landOff[1]; S.vx = bvx; S.vy = bvy;
-      S.touch = { down, side };
-      Pad.rumble(0.3, 0.4, 200);
-    } else {
-      const why = [];
-      if (down >= 3) why.push(`hit the ground at ${down.toFixed(1)} m/s (max 3)`);
-      if (side >= 2) why.push(`sliding ${side.toFixed(1)} m/s (max 2)`);
-      if (tilt >= 15 * Math.PI / 180) why.push(`tilted ${Math.round(tilt * 180 / Math.PI)}° (max 15)`);
-      crash(`Crashed on ${body.name}: ${why.join(", ")}.`);
+  if (!ct) {
+    // Far too fast for the contact model to catch: the centre of mass is underground
+    if (cl && cl.alt < 0) {
+      const body = cl.body, [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+      const dx = S.x - bx, dy = S.y - by;
+      if (Math.hypot(dx, dy) < body.R + terrainH(body, Math.atan2(dy, dx)))
+        crash(`Crashed into ${body.name} at ${Math.hypot(S.vx - bvx, S.vy - bvy).toFixed(0)} m/s.`);
     }
-    break;
+    return;
   }
+  const body = cl.body, d = a => Math.round(Math.abs(a) * 180 / Math.PI);
+  for (const im of ct.impacts) {
+    if (im.foot && im.speed > Lander.LEG_BREAK) return crash(`Crashed on ${body.name}: a landing leg hit the ground at ${im.speed.toFixed(1)} m/s (the legs take ${Lander.LEG_BREAK}).`);
+    if (!im.foot && im.speed > 2 && !S.impact) return crash(`Crashed on ${body.name}: the hull hit the ground at ${im.speed.toFixed(1)} m/s.`);
+    if (im.foot && !S.impact) {
+      // First touch: remember how it came down, to explain a tip-over
+      const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+      const up = Math.atan2(S.y - by, S.x - bx), foot = craftPoints()[0];
+      const n = groundBelow(body, S.x + foot.x, S.y + foot.y);
+      S.touchInfo = { tilt: wrap(S.th - up), slope: n ? wrap(Math.atan2(n.ny, n.nx) - up) : 0,
+                      side: Math.abs((S.vx - bvx) * Math.sin(up) - (S.vy - bvy) * Math.cos(up)) };
+      Lander.voice.event("contact");
+    }
+    if (im.foot) S.impact = Math.max(S.impact || 0, im.speed);
+  }
+  const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+  if (ct.body) {
+    const ti = S.impact && S.touchInfo;
+    crash(ti
+      ? `Tipped over on ${body.name}: it touched down tilted ${d(ti.tilt)}° on ground sloping ${d(ti.slope)}°, moving ${ti.side.toFixed(1)} m/s sideways, and fell over.`
+      : `Tipped over on ${body.name}: the hull touched the ground before the legs.`);
+    Lander.voice.event("tipped");
+    return;
+  }
+  // At rest on the legs for a moment: landed. Lock to the ground from here on.
+  if (ct.feet >= 1 && Math.hypot(S.vx - bvx, S.vy - bvy) < 0.12 && Math.abs(S.om) < 0.06) {
+    S.settle = (S.settle || 0) + dt;
+    if (S.settle > 0.7) {
+      S.landedOn = body; S.landOff = [S.x - bx, S.y - by]; S.om = 0; S.vx = bvx; S.vy = bvy;
+      S.touch = { down: S.impact || 0 }; S.mem = []; S.settle = 0;
+      Pad.rumble(0.3, 0.4, 200);
+      Lander.voice.event("landed");
+    }
+  } else S.settle = 0;
+}
+
+// Auto-land: the autopilot (lander.js) works in the local frame (up = away from the
+// ground, side = right on screen); the stick drifts sideways to pick a spot
+function autoPilot(p, cl) {
+  const body = cl.body, [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+  const rx = S.x - bx, ry = S.y - by, r = Math.hypot(rx, ry), ux = rx / r, uy = ry / r, sx = uy, sy = -ux;
+  const vx = S.vx - bvx, vy = S.vy - bvy, vUp = vx * ux + vy * uy, vSide = vx * sx + vy * sy;
+  const g = body.mu / (r * r) - vSide * vSide / r;   // gravity less the "centrifugal" part
+  const amax = S.fuel[S.stage] > 0 ? STAGES[S.stage].thrust / mass(S) : 0;
+  const a = Lander.autoLand({ alt: cl.alt, vUp, vSide, g, amax, wantSide: p.lx * 20 });
+  const wx = a.aUp * ux + a.aSide * sx, wy = a.aUp * uy + a.aSide * sy;
+  S.target = wrap(Math.atan2(uy, ux) - a.tilt);   // lean from local up toward +side (right)
+  hold = null;
+  // Keeps lowering gently until both legs are down, then cuts the engine (RT still adds thrust)
+  const feetDown = S.mem.filter((dn, i) => dn && CRAFT_PTS[S.stage][i].foot).length;
+  const thr = amax > 0 && feetDown < 2 ? clamp((wx * Math.cos(S.th) + wy * Math.sin(S.th)) / amax, 0, 1) : 0;
+  autoInfo = { vTarget: a.vTarget };
+  return { thr: Math.max(thr, p.rt, p.lt * 0.1), turn: 0 };
+}
+function vUpRel(body) {
+  const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+  const rx = S.x - bx, ry = S.y - by, r = Math.hypot(rx, ry);
+  return ((S.vx - bvx) * rx + (S.vy - bvy) * ry) / r;
 }
 
 function holdDir() {
@@ -266,6 +410,7 @@ function holdDir() {
 }
 
 function crash(msg) {
+  Lander.voice.event("crash");
   S.crashed = msg; state = "crashed";
   for (let i = 0; i < 80; i++) {
     const a = Math.random() * Math.PI * 2, s = 5 + Math.random() * 40;
@@ -276,6 +421,7 @@ function crash(msg) {
 
 function stage() {
   if (S.stage >= STAGES.length - 1) return;
+  if (S.landedOn) { banner = { text: "Can't separate on the ground", sub: "Lift off first", until: performance.now() + 2000 }; return; }
   const st = STAGES[S.stage];
   debris.push({ x: S.x, y: S.y, vx: S.vx - Math.cos(S.th) * 5, vy: S.vy - Math.sin(S.th) * 5, th: S.th, life: 25 });
   S.stage++;
@@ -284,28 +430,55 @@ function stage() {
 }
 
 // ---------- checkpoints ----------
-const KEY = "orbit-mission-checkpoint";
-let checkpoint = null;
-function saveCheckpoint() {
+// Every assignment you reach saves a checkpoint, and so does coming within radar
+// range of Luna on the way down ("Ready to land"). Start from any of them later
+// (menu: Choose checkpoint, or D-pad on the title screen).
+const KEY = "orbit-mission-checkpoint";        // the one you're playing from
+const ALL_KEY = "orbit-mission-checkpoints";   // one per assignment reached, then "Ready to land"
+const READY = PHASES.length;                   // slot of the "Ready to land" checkpoint
+let checkpoint = null, checkpoints = [], titleCp = 0;
+const cpName = i => i === READY ? "6+. Ready to land (radar range)" : `${i + 1}. ${PHASES[i].name}`;
+const cpTag = i => i === READY ? "6+" : String(i + 1);
+function saveCheckpoint(slot = S.phase < PHASES.length ? S.phase : null) {
   checkpoint = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
-  try { localStorage.setItem(KEY, JSON.stringify(checkpoint)); } catch (e) {}
+  if (slot !== null) checkpoints[slot] = checkpoint;
+  try { localStorage.setItem(KEY, JSON.stringify(checkpoint)); localStorage.setItem(ALL_KEY, JSON.stringify(checkpoints)); } catch (e) {}
 }
-function loadCheckpoint() {
-  let cp = checkpoint;
+function loadCheckpoint(cp = checkpoint) {
   if (!cp) { try { cp = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {} }
   if (!cp) return false;
+  checkpoint = cp;
+  try { localStorage.setItem(KEY, JSON.stringify(cp)); } catch (e) {}
   S = JSON.parse(JSON.stringify(cp));
   S.landedOn = S.landedOn === "Terra" ? TERRA : S.landedOn === "Luna" ? LUNA : null;
-  S.crashed = null; S.om = 0; S.target = S.th;
+  S.crashed = null; S.om = 0; S.target = S.th; S.mem = []; S.settle = 0; S.impact = 0;
+  if (S.landedOn) placeOnGround();   // older saves sat on a ground without terrain
   if (infFuel) for (let i = S.stage; i < STAGES.length; i++) S.fuel[i] = STAGES[i].fuel;
   warpIdx = 0; hold = null; Assist.pid.reset(); parts = []; debris = [];
   pred.at = 0; banner = null; lastDom = dominant(S.x, S.y, S.t);
+  Lander.voice.reset(S.landedOn ? 0 : clearance().alt);
   return true;
 }
-// A finished mission isn't worth continuing; only offer unfinished ones
-function hasSaved() {
-  try { const cp = JSON.parse(localStorage.getItem(KEY) || "null"); return !!cp && cp.phase < PHASES.length; }
-  catch (e) { return false; }
+function startFrom(i) {
+  if (i === 0 || !checkpoints[i]) newMission(); else loadCheckpoint(checkpoints[i]);
+  state = "play";
+}
+const SLOTS = [...PHASES.keys(), READY];
+function reached() { return SLOTS.filter(i => checkpoints[i]); }
+function chooseCheckpoint() {
+  Pad.submenu("Choose checkpoint", SLOTS.map(i => checkpoints[i]
+    ? { label: cpName(i) + (i === 0 ? " (launch pad)" : ""), action: () => startFrom(i) }
+    : { label: `🔒 ${cpName(i)}: not reached yet`, keepOpen: true, action: () => {} }));
+}
+function loadSaved() {
+  try { checkpoints = JSON.parse(localStorage.getItem(ALL_KEY) || "[]") || []; } catch (e) { checkpoints = []; }
+  try { checkpoint = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
+  // Saves from before the checkpoint list: keep the one there was
+  if (checkpoint && checkpoint.phase < PHASES.length && !checkpoints[checkpoint.phase]) checkpoints[checkpoint.phase] = checkpoint;
+  if (!checkpoints[0]) checkpoints[0] = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
+  const r = reached();
+  titleCp = checkpoint && checkpoint.readyCp && checkpoints[READY] ? READY
+    : checkpoint && checkpoint.phase < PHASES.length ? checkpoint.phase : r[r.length - 1];
 }
 
 // ---------- prediction ----------
@@ -338,7 +511,8 @@ function predict() {
 function situation() {
   const dom = dominant(S.x, S.y, S.t);
   const el = elements(S, dom);
-  return { dom, el, alt: el.r - dom.R, landedOn: S.landedOn };
+  const cl = clearance();
+  return { dom, el, alt: el.r - dom.R, radar: Math.max(0, cl.alt), landedOn: S.landedOn };
 }
 
 // Fast warp is only allowed coasting in space; burns and low flight run near real time
@@ -358,13 +532,14 @@ function warpLimitReason() {
 
 let lastDom = TERRA;
 function update(dt, p) {
-  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); S.target = S.th; hold = null; }
+  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); S.target = S.th; hold = null; if (!assist) autoLand = false; }
+  if (p.pressed[B.L3]) toggleAutoLand();
   if (p.pressed[B.Y]) stage();
   if (p.pressed[B.A]) { view = (view + 1) % VIEWS.length; mapView = view > 0; zoomMul = 1; viewNote = performance.now() + 2000; }
   if (p.pressed[B.R3]) zoomMul = 1;
   if (p.pressed[B.RB]) {
     warpIdx = Math.min(WARPS.length - 1, warpIdx + 1);
-    const cap = maxWarp(situation(), Math.max(p.rt, p.lt * 0.1));
+    const cap = maxWarp(situation(), autoActive ? 1 : Math.max(p.rt, p.lt * 0.1));
     if (warpIdx > cap) warpNote = { text: warpLimitReason(), until: performance.now() + 2200 };
   }
   if (p.pressed[B.LB]) warpIdx = Math.max(0, warpIdx - 1);
@@ -373,14 +548,18 @@ function update(dt, p) {
   if (p.pressed[B.B]) toggleFuel();
   // Assist: the stick is an absolute pointer on screen. Screen angle -> world angle
   // undoes the camera rotation, so "stick up" always means "nose up on screen".
-  aiming = assist && Math.hypot(p.lx, p.ly) > 0.4;
+  // Auto-land takes over below the radar altitude, while not climbing away
+  const cl0 = clearance();
+  autoActive = autoLand && !S.landedOn && cl0.alt < Lander.radarFrom(cl0.body.g) && vUpRel(cl0.body) < 5;
+  if (!autoActive) autoInfo = null;
+  aiming = assist && !autoActive && Math.hypot(p.lx, p.ly) > 0.4;
   if (aiming) { hold = null; S.target = wrap(Math.atan2(-p.ly, p.lx) + (cam.rot || 0)); }
   else if (!assist && Math.abs(p.lx) > 0.2) hold = null;
   zoomMul = clamp(zoomMul * Math.pow(2, -p.ry * dt * 2.5), 0.02, 50);
 
   const thr = Math.max(p.rt, p.lt * 0.1);
   let sit = situation();
-  warpIdx = Math.min(warpIdx, maxWarp(sit, thr));
+  warpIdx = Math.min(warpIdx, maxWarp(sit, autoActive ? 1 : thr));
   const warp = WARPS[warpIdx];
 
   // Integrate with steps small enough for accuracy at this warp
@@ -389,9 +568,12 @@ function update(dt, p) {
     const o = accel(S.x, S.y, S.vx, S.vy, S.t, {});
     const nearR = Math.min(o.r, o.d), nearMu = o.d < LUNA.soi ? LUNA.mu : TERRA.mu;
     let h = clamp(0.002 * Math.sqrt(nearR ** 3 / nearMu), 0.01, 20);
-    if (thr > 0.001 || !S.landedOn && (o.r - TERRA.R < 100e3 || o.d - LUNA.R < 30e3)) h = Math.min(h, 1 / 60);
+    if (thr > 0.001 || autoActive || !S.landedOn && (o.r - TERRA.R < 100e3 || o.d - LUNA.R < 30e3)) h = Math.min(h, 1 / 60);
+    // Near the ground the leg springs need small steps
+    const cl = S.landedOn ? null : clearance();
+    if (cl && cl.alt < 60) h = Math.min(h, 1 / 240);
     h = Math.min(h, remaining);
-    stepPhysics(h, { thr, turn: p.lx });
+    stepPhysics(h, autoActive && cl ? autoPilot(p, cl) : { thr, turn: p.lx });
     remaining -= h;
   }
 
@@ -406,13 +588,27 @@ function update(dt, p) {
   if (state === "play" && S.phase < PHASES.length && PHASES[S.phase].done(sit)) {
     const ph = PHASES[S.phase];
     const fuelBonus = infFuel ? 0 : Math.round(deltaV(S) / 10);
-    let pts = 100 + (S.phase === PHASES.length - 1 ? fuelBonus + Math.round((3 - S.touch.down) * 50) : 0);
+    let pts = 100 + (S.phase === PHASES.length - 1 ? fuelBonus + Math.max(0, Math.round((3 - S.touch.down) * 50)) : 0);
     S.score += pts; S.phase++;
     Pad.rumble(0.3, 0.5, 250);
     if (S.phase >= PHASES.length) { state = "complete"; saveCheckpoint(); }
     else {
       banner = { text: `✓ ${ph.name}  +${pts}`, sub: `Checkpoint saved · next: ${PHASES[S.phase].name}`, until: performance.now() + 3500 };
       saveCheckpoint();
+    }
+  }
+  // Ready to land: the first time the radar picks up Luna's surface on the landing
+  // assignment, if the engine can still stop the fall in time
+  if (state === "play" && S.phase === PHASES.length - 1 && !S.readyCp && !S.landedOn && sit.dom === LUNA) {
+    const from = Lander.radarFrom(LUNA.g);
+    if (sit.radar < from) {
+      const r = sit.el.r, g = LUNA.mu / (r * r), amax = S.fuel[S.stage] > 0 ? STAGES[S.stage].thrust / mass(S) : 0;
+      const vUp = vUpRel(LUNA), stop = vUp < 0 ? vUp * vUp / (2 * Math.max(1e-6, amax - g)) : 0;
+      if (amax > g * 1.2 && stop < sit.radar * 0.8) {
+        S.readyCp = true; saveCheckpoint(READY);
+        Lander.voice.event("ready");
+        banner = { text: "✓ Ready to land", sub: `Checkpoint saved at ${Lander.fmtAlt(sit.radar)} radar altitude · L3 auto-land`, until: performance.now() + 3500 };
+      }
     }
   }
   if (performance.now() - pred.at > (warp > 10 ? 120 : 250)) predict();
@@ -425,6 +621,12 @@ function update(dt, p) {
   }
   debris = debris.filter(d => d.life > 0 && Math.hypot(d.x, d.y) > TERRA.R);
   if (S.thr > 0.05) Pad.rumble(S.thr * 0.3, S.thr * 0.3, 160);
+  // Spoken altitude callouts and warnings within radar range (lander.js)
+  if (state === "play" && !S.landedOn) {
+    const r = sit.el.r, amax = S.fuel[S.stage] > 0 ? STAGES[S.stage].thrust / mass(S) : 0;
+    Lander.voice.update({ alt: sit.radar, vUp: vUpRel(sit.dom), g: sit.dom.mu / (r * r), amax,
+                         contact: S.mem.some(Boolean), from: Lander.radarFrom(sit.dom.g) + 1 });
+  }
 }
 
 // ---------- rendering ----------
@@ -445,8 +647,9 @@ function camera(sit) {
       k = H / (2.4 * Math.max(far, TERRA.R * 1.4));
     }
   } else {
+    // Height of view follows the radar altitude: about 50 m on the ground, to see the legs
     cx = S.x; cy = S.y;
-    const view = clamp(sit.alt * 2.2 + 400, 600, 3e6);
+    const view = clamp(sit.radar * 2.4 + 40, 50, 3e6);
     k = H / view;
   }
   k *= zoomMul;
@@ -457,9 +660,10 @@ const SY = y => H / 2 - (y - cam.y) * cam.k;
 
 function drawBody(body, bx, by) {
   const R = body.R * cam.k, sx = SX(bx), sy = SY(by);
-  // Skip if off screen (distance test, so it still works with the view rotated)
-  if (Math.hypot(sx - W / 2, sy - H / 2) - R > Math.hypot(W, H) / 2 + 50) return;
-  if (R < 30000) {
+  // Skip if off screen (distance test, so it still works with the view rotated;
+  // mountains reach up to about 2 km above the mean radius)
+  if (Math.hypot(sx - W / 2, sy - H / 2) - R - 2000 * cam.k > Math.hypot(W, H) / 2 + 50) return;
+  if (R < 3000) {
     if (body === TERRA) {
       const g = ctx.createRadialGradient(sx, sy, R, sx, sy, R + TERRA.atmo * cam.k);
       g.addColorStop(0, "rgba(90,160,255,0.35)"); g.addColorStop(1, "rgba(90,160,255,0)");
@@ -478,15 +682,15 @@ function drawBody(body, bx, by) {
       for (const [a, s] of [[0.5, 0.2], [2.4, 0.15], [4.0, 0.25]]) { ctx.beginPath(); ctx.arc(sx + Math.cos(a) * R * 0.5, sy - Math.sin(a) * R * 0.5, R * s, 0, Math.PI * 2); ctx.fill(); }
     }
   } else {
-    // Huge on screen: draw the local surface as a polygon around the camera
-    const ca = Math.atan2(cam.y - by, cam.x - bx), span = (Math.max(W, H) / R) * 1.5;
+    // Huge on screen: draw the local surface, with its terrain, around the camera
+    const ca = Math.atan2(cam.y - by, cam.x - bx), span = Math.min(Math.PI, (Math.max(W, H) / R) * 1.5), n = 240;
     ctx.beginPath();
-    for (let i = 0; i <= 64; i++) {
-      const a = ca - span + (2 * span * i) / 64;
-      const px = SX(bx + Math.cos(a) * body.R), py = SY(by + Math.sin(a) * body.R);
+    for (let i = 0; i <= n; i++) {
+      const a = ca - span + (2 * span * i) / n, rr = body.R + terrainH(body, a);
+      const px = SX(bx + Math.cos(a) * rr), py = SY(by + Math.sin(a) * rr);
       i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
     }
-    const deep = body.R - Math.max(W, H) / cam.k * 2;
+    const deep = body.R - Math.max(W, H) / cam.k * 2 - 3000;
     ctx.lineTo(SX(bx + Math.cos(ca + span) * deep), SY(by + Math.sin(ca + span) * deep));
     ctx.lineTo(SX(bx + Math.cos(ca - span) * deep), SY(by + Math.sin(ca - span) * deep));
     ctx.closePath();
@@ -612,7 +816,10 @@ const screenDeg = a => ((Math.round(90 - (a - (cam.rot || 0)) * 180 / Math.PI) %
 function drawStatus() {
   let mode, detail;
   const err = Math.abs(wrap(S.target - S.th)) * 180 / Math.PI;
-  if (!assist) {
+  if (autoActive && !S.landedOn) {
+    mode = S.mem.some(Boolean) ? "Auto-land: touching down, engine off" : `Auto-land: descending at ${autoInfo ? (-autoInfo.vTarget).toFixed(1) : "–"} m/s target`;
+    detail = "Stick ◀▶ drifts toward a landing spot · RT adds thrust · L3 hands back control";
+  } else if (!assist) {
     mode = "Manual: stick ◀▶ fires the rotation thrusters";
     detail = "Spin keeps going until you counter it · X: assist on";
   } else {
@@ -624,6 +831,7 @@ function drawStatus() {
   Assist.drawStatus(ctx, 14, H - 30, { mode, detail, rows: [
     { name: "Attitude hold (PID)", value: assist ? "ON" : "OFF", on: assist, key: "X" },
     { name: "Direction lock", value: hold ? holdShort : "OFF", on: !!hold, key: "D-pad" },
+    { name: `Auto-land (below ${Math.round(Lander.radarFrom(situation().dom.g) / 1000)} km)`, value: !autoLand ? "OFF" : S.landedOn ? "LANDED" : autoActive ? "ACTIVE" : "STANDBY", on: autoActive, key: "L3 · click stick" },
     { name: "Unlimited fuel", value: infFuel ? "ON" : "OFF", on: infFuel, key: "B" },
     { name: "Time warp", value: `${WARPS[warpIdx]}×`, on: WARPS[warpIdx] > 1, key: "LB / RB" },
   ] });
@@ -635,10 +843,12 @@ function row(label, value, y, color) {
 }
 
 function drawHUD(sit) {
-  // Assignment card (left)
-  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(14, 14, 330, 74 + PHASES.length * 20, 12); ctx.fill();
-  ctx.textAlign = "left";
+  // Assignment card (left); the checklist goes below however many lines the goal takes
   const ph = PHASES[Math.min(S.phase, PHASES.length - 1)];
+  ctx.font = "500 12px system-ui";
+  const goalEnd = wrapText(ph.goal, 28, 74, 300, 15, false), listY = goalEnd + 30;
+  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(14, 14, 330, listY - 14 + PHASES.length * 20 - 6, 12); ctx.fill();
+  ctx.textAlign = "left";
   ctx.fillStyle = "#ffb547"; ctx.font = "700 12px system-ui"; ctx.fillText(`ASSIGNMENT ${Math.min(S.phase + 1, PHASES.length)} / ${PHASES.length}`, 28, 36);
   ctx.fillStyle = "#fff"; ctx.font = "800 17px system-ui"; ctx.fillText(ph.name, 28, 56);
   ctx.fillStyle = "#c9d1e0"; ctx.font = "500 12px system-ui";
@@ -646,7 +856,7 @@ function drawHUD(sit) {
   PHASES.forEach((p, i) => {
     ctx.fillStyle = i < S.phase ? "#3ddc84" : i === S.phase ? "#fff" : "#5c6475";
     ctx.font = "600 12px system-ui";
-    ctx.fillText(`${i < S.phase ? "✓" : i === S.phase ? "▸" : "○"} ${p.name}`, 28, 112 + i * 20);
+    ctx.fillText(`${i < S.phase ? "✓" : i === S.phase ? "▸" : "○"} ${p.name}`, 28, listY + i * 20);
   });
 
   // Telemetry (right)
@@ -655,7 +865,7 @@ function drawHUD(sit) {
   const el = sit.el;
   const rad = (el.rx * el.vx + el.ry * el.vy) / el.r;
   row("Near", sit.dom.name + (S.landedOn ? " (landed)" : ""), y); y += 22;
-  row("Altitude", fmtDist(sit.alt), y); y += 22;
+  row("Altitude (sea level)", fmtDist(sit.alt), y); y += 22;
   row("Speed", el.v.toFixed(1) + " m/s", y); y += 22;
   row("Vertical speed", (rad >= 0 ? "+" : "") + rad.toFixed(1) + " m/s", y, rad < -3 && sit.alt < 5e3 ? "#ff6b5c" : undefined); y += 22;
   // Orbit numbers mean nothing while sitting on the ground
@@ -684,12 +894,21 @@ function drawHUD(sit) {
   ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(W - 262, 352, 248, 6);
   ctx.fillStyle = "#4cc2ff"; ctx.fillRect(W - 262, 352, 248 * S.thr, 6);
 
+  // Radar altitude appears close to the ground; stronger gravity shows it higher up
+  const radarFrom = Lander.radarFrom(sit.dom.g);
+  if (sit.radar < radarFrom && !S.landedOn) {
+    const [, , bvx, bvy] = sit.dom === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+    const r = Math.hypot(sit.el.rx, sit.el.ry), vUp = ((S.vx - bvx) * sit.el.rx + (S.vy - bvy) * sit.el.ry) / r;
+    const amax = S.fuel[S.stage] > 0 ? STAGES[S.stage].thrust / mass(S) : 0;
+    Lander.drawRadar(ctx, W - 276, 366, { alt: sit.radar, vUp, g: sit.dom.mu / (r * r), amax, from: radarFrom, title: `RADAR ALTITUDE · ${sit.dom.name.toUpperCase()}` });
+  }
   drawAttitude(sit);
   drawStatus();
+  Lander.voice.drawHint(ctx, Math.max(W / 2, 560), H - 176);   // clear of the Assists panel
 
   ctx.textAlign = "left"; ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.font = "600 12px system-ui";
   ctx.textAlign = "left";
-  ctx.fillText(`RT throttle · LT fine · Stick point · D-pad ▲pro ▼retro ▶out ◀in · X assist · Y stage · B fuel ∞ · LB/RB time warp · A view (${VIEWS[view]}) · RS zoom · Start menu`, 14, H - 14);
+  ctx.fillText(`RT throttle · LT fine · Stick point · D-pad ▲pro ▼retro ▶out ◀in · X assist · Y stage · B fuel ∞ · L3 auto-land · LB/RB time warp · A view (${VIEWS[view]}) · RS zoom · Start menu`, 14, H - 14);
 
   // Big time-warp badge and view name, top centre
   ctx.textAlign = "center";
@@ -714,14 +933,16 @@ function drawHUD(sit) {
   }
 }
 
-function wrapText(text, x, y, maxW, lh) {
+// Returns the y of the last line; draw = false only measures
+function wrapText(text, x, y, maxW, lh, draw = true) {
   const words = text.split(" "); let line = "";
   for (const w of words) {
     const test = line ? line + " " + w : w;
-    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, y); y += lh; line = w; }
+    if (ctx.measureText(test).width > maxW && line) { if (draw) ctx.fillText(line, x, y); y += lh; line = w; }
     else line = test;
   }
-  if (line) ctx.fillText(line, x, y);
+  if (line && draw) ctx.fillText(line, x, y);
+  return y;
 }
 
 function panel(lines) {
@@ -769,11 +990,12 @@ function render(p) {
   drawBody(TERRA, 0, 0);
   drawBody(LUNA, lx, ly);
   drawPath(sit);
-  for (const d of debris) drawRocket(d.x, d.y, d.th, Math.max(14, 30 * cam.k), 0.6, 0);
+  for (const d of debris) drawRocket(d.x, d.y, d.th, Math.max(14, 12 * cam.k), 0.6, 0);
   for (const q of parts) { ctx.fillStyle = q.c; ctx.globalAlpha = clamp(q.life, 0, 1); ctx.fillRect(SX(q.x) - 2, SY(q.y) - 2, 4, 4); }
   ctx.globalAlpha = 1;
   if (state !== "crashed") {
-    const size = mapView ? 22 : Math.max(26, 30 * cam.k);
+    // Drawn to scale up close (one drawing unit = 0.4 m: the lander is 7.6 m tall)
+    const size = mapView ? 22 : Math.max(26, 12 * cam.k);
     drawRocket(S.x, S.y, S.th, size, 1, S.stage, S.thr);
     if (assist && state === "play") {
       // Dashed line where the assist is steering the nose
@@ -797,7 +1019,8 @@ function render(p) {
       ["Fly from Terra to Luna with real orbital mechanics.", 17],
       ["Launch → orbit → transfer → capture → lunar orbit → landing. Each step is a checkpoint.", 15],
       ["Time warp (LB/RB) only speeds up game time: the physics stays exact.", 14, "#8a92a3"],
-      [hasSaved() ? "A: continue from checkpoint · X: new mission" : "Press A to start", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      [titleCp > 0 ? `A: start at ${cpName(titleCp)} · X: new mission` : "Press A to start", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      [reached().length > 1 ? "D-pad ◀ ▶ choose checkpoint: " + reached().map(i => i === titleCp ? `[${cpTag(i)}]` : cpTag(i)).join(" ") : "Each assignment you reach becomes a checkpoint you can start from", 14, "#c9d1e0"],
       [`Y: landing practice · B: hub · Unlimited fuel ${infFuel ? "ON" : "OFF"} (B while flying)`, 13, "#5c6475"],
     ]);
     return;
@@ -807,8 +1030,8 @@ function render(p) {
     panel([
       ["Mission lost", 36, "#ff6b5c", 900],
       [S.crashed, 15],
-      [`Checkpoint: ${PHASES[Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1)].name}`, 15, "#8a92a3"],
-      ["A: load checkpoint · Start: menu", 18, "#3ddc84", 700],
+      [`Checkpoint: ${checkpoint && checkpoint.readyCp ? "Ready to land (radar range)" : PHASES[Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1)].name}`, 15, "#8a92a3"],
+      ["A: retry from this checkpoint · Start: menu → choose any checkpoint", 17, "#3ddc84", 700],
     ]);
   } else if (state === "complete") {
     panel([
@@ -830,8 +1053,11 @@ Pad.setup({
   items: [
     { label: "Resume", action: () => {} },
     { label: "Load last checkpoint", action: () => { if (loadCheckpoint()) state = "play"; } },
+    { label: "Choose checkpoint…", keepOpen: true, action: chooseCheckpoint },
+    { get label() { return `Auto-land: ${autoLand ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleAutoLand },
     { label: "Restart mission", action: () => { newMission(); state = "play"; } },
     { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
+    { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
     { label: "Tune attitude assist (PID)", action: () => { assist = true; Assist.open(); } },
     { label: "Landing practice", action: () => { location.href = "./"; } },
   ],
@@ -843,7 +1069,7 @@ Pad.setup({
 });
 
 newMission(false);
-try { const cp = JSON.parse(localStorage.getItem(KEY) || "null"); if (cp) checkpoint = cp; } catch (e) {}
+loadSaved();
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
@@ -851,8 +1077,10 @@ function frame(now) {
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
   if (p.connected && state !== "pause") {
     if (state === "title") {
-      if (p.pressed[B.A]) { if (!(hasSaved() && loadCheckpoint())) newMission(); state = "play"; }
-      else if (p.pressed[B.X]) { newMission(); state = "play"; }
+      const r = reached();
+      if (p.pressed[B.LEFT] || p.pressed[B.RIGHT]) titleCp = r[(r.indexOf(titleCp) + (p.pressed[B.RIGHT] ? 1 : r.length - 1)) % r.length];
+      else if (p.pressed[B.A]) startFrom(titleCp);
+      else if (p.pressed[B.X]) startFrom(0);
       else if (p.pressed[B.Y]) location.href = "./";
       else if (p.pressed[B.B]) location.href = "../../";
     } else if (state === "crashed") {

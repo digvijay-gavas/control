@@ -16,16 +16,18 @@
 <a id="hub" href="../../">← Hub</a>
 <script src="../../shared/pad.js"></script>
 <script src="assist.js"></script>
+<script src="lander.js"></script>
 <script>
 // Gravity Lander: land on real worlds with real physics.
 //   RT          main engine throttle (analog)
 //   Left stick  assist on: the tilt you want; a PID holds it (assist.js)
 //               assist off: rotation thrusters directly (spin keeps going)
 //   X           toggle attitude assist · menu has live PID tuning
+//   L3          auto-land on/off (flies the descent; stick drifts toward a spot)
 //   B           unlimited fuel on/off (while flying)
 //   LT          manual mode only: auto-level (analog: squeeze harder, stronger correction)
 //   Y           show / hide predicted path
-//   A           start, next world, retry
+//   A           start, next world, retry · D-pad ◀▶ on the title picks a world you've reached
 //   Start/Back  menu · B on title or result screen returns to the hub
 //
 // Physics, in SI units:
@@ -35,6 +37,8 @@
 //     so the craft gets lighter and accelerates harder as it burns (rocket equation)
 //   - drag = 1/2 * rho * Cd * A * v^2 against motion relative to the wind
 //   - rotation has inertia: thrusters change angular velocity, not the angle
+//   - touchdown is a rigid-body contact (lander.js): spring-damper legs, friction,
+//     so a tilted or sliding landing can bounce, slide or tip over
 
 const cv = document.getElementById("c");
 const ctx = cv.getContext("2d");
@@ -54,10 +58,14 @@ const B = Pad.BTN;
 const G0 = 9.80665, ISP = 311, DRY = 2000, CD = 1.2, AREA = 12;
 const FEET = [[-2.1, 0], [2.1, 0]];
 const BODY = [[-1.6, 1.0], [1.6, 1.0], [-1.3, 3.3], [1.3, 3.3], [0, 4.1]];
+// Physics runs about the centre of mass, 1.7 m above the feet; spin inertia m * 1.6²
+const COM_Y = 1.7, GYR = 1.6;
+const POINTS = [...FEET.map(([x, y]) => ({ x, y: y - COM_Y, foot: true })), ...BODY.map(([x, y]) => ({ x, y: y - COM_Y, foot: false }))];
 const SAFE_VY = 2.5, SAFE_VX = 1.5, SAFE_TILT = 11 * Math.PI / 180, SAFE_SPIN = 0.6;
 const MAX_ALPHA = 1.8;                 // rotation thrusters' angular acceleration with a full tank, rad/s²
 const MAX_TILT = 40 * Math.PI / 180;   // assist: full stick asks for this much tilt
 let assist = true;                     // X toggles attitude assist (PID angle hold) / manual
+let autoLand = false;                  // L3: the autopilot flies the descent
 
 const WORLDS = [
   { name: "Moon",  g: 1.62, rho: 0,     wind: 0,  pads: 3, padMin: 10, sky: ["#020308", "#10131d"], ground: "#9a9ca3", dark: "#5d6067", note: "No air at all: nothing slows you down but your engine." },
@@ -103,14 +111,17 @@ function newLevel(idx, r) {
 
   // Craft: fuel from the rocket equation for a delta-v budget of ~2x the ideal
   // braking burn plus about 18 s of hovering (hovering costs g m/s every second)
-  const h = 56, dvNeeded = Math.sqrt(2 * world.g * (h - 15)) * 2.2 + world.g * 18 + 20;
+  const h = 56 + COM_Y, dvNeeded = Math.sqrt(2 * world.g * (h - 15)) * 2.2 + world.g * 18 + 20;
   const fuel = DRY * (Math.exp(dvNeeded / (ISP * G0)) - 1);
   maxThrust = 2.3 * (DRY + fuel) * world.g;          // thrust-to-weight 2.3 when full
-  L = { x: WW * 0.08, y: h, vx: rand(3, 6), vy: rand(-1.5, 0), th: rand(-0.15, 0.15), om: 0, fuel, fuel0: fuel, thr: 0, rcs: 0 };
+  L = { x: WW * 0.08, y: h, vx: rand(3, 6), vy: rand(-1.5, 0), th: rand(-0.15, 0.15), om: 0, fuel, fuel0: fuel, thr: 0, rcs: 0,
+        mem: [], impact: 0, settle: 0, touch: null, feet: 0, auto: null };
   windBase = world.wind * rand(0.4, 1) * (Math.random() < 0.5 ? -1 : 1);
   L.target = 0; Assist.pid.reset();
   t = 0; parts = []; result = null;
   cam = { x: WW / 2, y: WH / 2, z: 1 };
+  if (idx + 1 > unlocked) unlocked = idx + 1;
+  Lander.voice.reset(footAlt());
 }
 
 function groundAt(x) {
@@ -120,12 +131,28 @@ function groundAt(x) {
   }
   return x < 0 ? terrain[0].y : terrain[terrain.length - 1].y;
 }
+// Ground under a world point for the contact model: depth and the slope's normal
+function groundContact(wx, wy) {
+  const gy = groundAt(wx);
+  if (wy > gy) return null;
+  let nx = 0, ny = 1;
+  for (let i = 0; i < terrain.length - 1; i++) {
+    const a = terrain[i], b = terrain[i + 1];
+    if (wx >= a.x && wx <= b.x && b.x > a.x) { const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy); nx = -dy / l; ny = dx / l; break; }
+  }
+  return { pen: (gy - wy) * ny, nx, ny, gvx: 0, gvy: 0 };
+}
+function slopeAt(x) { return Math.atan(groundAt(x + 0.5) - groundAt(x - 0.5)); }
+// Height of the lowest foot above the ground (what a radar altimeter reads)
+function footAlt() { return Math.min(...FEET.map(f => { const [x, y] = toWorld(f[0], f[1]); return y - groundAt(x); })); }
 function windAt(time) {
   if (!world.wind) return 0;
   return windBase + world.wind * 0.35 * Math.sin(time * 0.7) + world.wind * 0.15 * Math.sin(time * 2.3 + 1);
 }
+// Craft drawing coordinates (feet at y = 0) to world
 function toWorld(px, py, s = L) {
   const c = Math.cos(s.th), sn = Math.sin(s.th);
+  py -= COM_Y;
   return [s.x + px * c - py * sn, s.y + px * sn + py * c];
 }
 
@@ -142,10 +169,29 @@ function accel(s, thr, time) {
   return [ax, ay, F, m];
 }
 
+// Auto-land: the autopilot (lander.js) works out the thrust it wants; the craft
+// tilts toward it and the throttle gives only the part along the nose
+function autoPilot(p) {
+  const m = DRY + L.fuel, amax = L.fuel > 0 ? maxThrust / m : 0;
+  const a = Lander.autoLand({ alt: footAlt(), vUp: L.vy, vSide: L.vx, g: world.g, amax, wantSide: p.lx * 6 });
+  const thr = amax > 0 ? clamp((-a.aSide * Math.sin(L.th) + a.aUp * Math.cos(L.th)) / amax, 0, 1) : 0;
+  return { thr, target: clamp(-a.tilt, -MAX_TILT, MAX_TILT), vTarget: a.vTarget };
+}
+
 function step(dt, p) {
-  const thr = p.rt;
+  const flying = state === "play";   // otherwise the craft has tipped over and is coming to rest
+  const feetDown = L.mem.filter((d, i) => d && POINTS[i].foot).length;
+  L.auto = flying && autoLand ? autoPilot(p) : null;
+  // Auto-land keeps lowering gently until both legs are down, then cuts the engine
+  // (RT still adds thrust)
+  let thr = flying ? p.rt : 0;
+  if (L.auto && feetDown < 2) thr = Math.max(thr, L.auto.thr);
   const [ax, ay, F, m] = accel(L, thr, t);
-  L.vx += ax * dt; L.vy += ay * dt;
+  const c = Math.cos(L.th), sn = Math.sin(L.th);
+  const pts = POINTS.map(q => ({ x: q.x * c - q.y * sn, y: q.x * sn + q.y * c, foot: q.foot }));
+  const ct = Lander.contact(L, pts, m, groundContact, L.mem);
+  L.feet = ct.feet;
+  L.vx += (ax + ct.fx / m) * dt; L.vy += (ay + ct.fy / m) * dt;
   L.x += L.vx * dt; L.y += L.vy * dt;
   if (!infFuel) L.fuel = Math.max(0, L.fuel - F / (ISP * G0) * dt);
   L.thr = L.fuel > 0 ? thr : 0;
@@ -153,8 +199,14 @@ function step(dt, p) {
   // Rotation: thrusters give angular acceleration, scaled by mass (lighter turns quicker).
   // Angle th is counter-clockwise, so pushing the stick right means negative alpha.
   const inertia = m / (DRY + L.fuel0), maxAlpha = MAX_ALPHA / inertia;
-  let alpha;
-  if (assist) {
+  let alpha = 0;
+  if (!flying || ct.feet >= 2) {
+    // Both legs down (or tipped over): the thrusters stop fighting the ground
+    L.target = L.th; Assist.pid.reset();
+  } else if (L.auto) {
+    L.target = L.auto.target;
+    alpha = Assist.pid.update(Math.atan2(Math.sin(L.target - L.th), Math.cos(L.target - L.th)), L.om, dt, maxAlpha);
+  } else if (assist) {
     // Stick sets the wanted tilt; the PID asks the thrusters to hold it
     L.target = -p.lx * MAX_TILT;
     alpha = Assist.pid.update(Math.atan2(Math.sin(L.target - L.th), Math.cos(L.target - L.th)), L.om, dt, maxAlpha);
@@ -165,53 +217,64 @@ function step(dt, p) {
     L.target = 0;
   }
   if (L.fuel <= 0) alpha = 0;
-  L.om += alpha * dt; L.th += L.om * dt;
+  L.om += (alpha + ct.tq / (m * GYR * GYR)) * dt; L.th += L.om * dt;
   L.th = Math.atan2(Math.sin(L.th), Math.cos(L.th));
   L.rcs = alpha;
   if (!infFuel) L.fuel = Math.max(0, L.fuel - Math.abs(alpha) * 0.08 * dt);
   t += dt;
+  if (!flying) return;
   Assist.record(t, L.target, L.th);
 
   if (L.x < -6 || L.x > WW + 6) return crash("You flew off the map.");
-  for (const bp of BODY) {
-    const [x, y] = toWorld(bp[0], bp[1]);
-    if (y <= groundAt(x)) return crash(bodyCrashReason());
+  for (const im of ct.impacts) {
+    if (im.foot && im.speed > Lander.LEG_BREAK) return crash(`A landing leg collapsed: it hit the ground at ${im.speed.toFixed(1)} m/s (the legs take ${Lander.LEG_BREAK}).`);
+    // Falling over after touchdown hits the hull too; only a hard hit breaks it up
+    if (!im.foot && im.speed > (L.touch ? 6 : 2)) return crash(`The body hit the ground at ${im.speed.toFixed(1)} m/s.`);
+    if (im.foot) {
+      L.impact = Math.max(L.impact, im.speed);
+      if (!L.touch) { L.touch = { tilt: L.th, slope: slopeAt(L.x), side: L.vx }; Lander.voice.event("contact"); }
+    }
   }
-  const feet = FEET.map(f => toWorld(f[0], f[1]));
-  if (feet.some(([x, y]) => y <= groundAt(x))) touchdown(feet);
+  if (ct.body) return tipOver();
+  // At rest on the legs for a moment counts as landed (one leg can rest against a ledge)
+  if (ct.feet >= 1 && Math.hypot(L.vx, L.vy) < 0.12 && Math.abs(L.om) < 0.06) { L.settle += dt; if (L.settle > 0.7) touchdown(); }
+  else L.settle = 0;
 }
 
-function bodyCrashReason() {
-  if (Math.abs(L.th) > 0.6) return `The craft hit the ground tilted ${Math.round(Math.abs(L.th) * 180 / Math.PI)}°.`;
-  return `The body hit the ground at ${Math.hypot(L.vx, L.vy).toFixed(1)} m/s.`;
+function tipOver() {
+  const d = a => Math.round(Math.abs(a) * 180 / Math.PI);
+  const tc = L.touch;
+  const msg = tc
+    ? `It touched down tilted ${d(tc.tilt)}° on ground sloping ${d(tc.slope)}°, moving ${Math.abs(tc.side).toFixed(1)} m/s sideways, and fell over.`
+    : "The body touched the ground before the legs did.";
+  result = { ok: false, tipped: true, msg, simT: 0 };
+  Lander.voice.event("tipped");
+  state = "result";
+  L.thr = 0;
+  Pad.rumble(0.7, 0.6, 300);
 }
 
-function touchdown(feet) {
-  const fall = -L.vy, side = Math.abs(L.vx), tilt = Math.abs(L.th), spin = Math.abs(L.om);
-  const reasons = [];
-  if (fall > SAFE_VY) reasons.push(`falling ${fall.toFixed(1)} m/s (max ${SAFE_VY})`);
-  if (side > SAFE_VX) reasons.push(`sliding ${side.toFixed(1)} m/s sideways (max ${SAFE_VX})`);
-  if (tilt > SAFE_TILT) reasons.push(`tilted ${Math.round(tilt * 180 / Math.PI)}° (max 11°)`);
-  if (spin > SAFE_SPIN) reasons.push("still spinning");
-  const gl = groundAt(feet[0][0]), gr = groundAt(feet[1][0]);
-  if (!reasons.length && Math.abs(gl - gr) > 0.7) reasons.push("the ground is too steep");
-  if (reasons.length) return crash("Hard landing: " + reasons.join(", ") + ".");
-
-  const xs = feet.map(f => f[0]);
+function touchdown() {
+  const fall = L.impact;
+  const xs = FEET.map(f => toWorld(f[0], f[1])[0]);
   const pad = pads.find(pd => Math.min(...xs) >= pd.x0 && Math.max(...xs) <= pd.x1);
   const mult = pad ? pad.mult : 0;
   const fuelPct = infFuel ? 0 : L.fuel / L.fuel0;   // no fuel bonus with unlimited fuel
-  const softness = 1 - fall / SAFE_VY;
+  const softness = clamp(1 - fall / SAFE_VY, 0, 1);
   const points = Math.round((50 + fuelPct * 100 + softness * 50) * Math.max(mult, 0.5));
   total += points;
   L.vx = L.vy = L.om = 0; L.thr = 0;
-  result = { ok: true, points, pad, fall, fuelPct };
+  result = { ok: true, points, pad, fall, fuelPct, slope: slopeAt(L.x), tilt: L.th };
   state = "result";
+  if (levelIdx + 2 > unlocked) unlocked = Math.min(WORLDS.length, levelIdx + 2);
+  try { localStorage.setItem(WORLD_KEY, String(unlocked)); } catch (e) {}
   Pad.rumble(0.25, 0.35, 160);
+  Lander.voice.event("landed");
 }
 
 function crash(msg) {
   result = { ok: false, msg };
+  Lander.voice.event("crash");
   state = "result";
   for (let i = 0; i < 90; i++) {
     const a = Math.random() * Math.PI * 2, s = rand(2, 18);
@@ -226,8 +289,8 @@ function predictPath() {
     const [ax, ay, F] = accel(s, L.thr, t + i * dt);
     s.vx += ax * dt; s.vy += ay * dt; s.x += s.vx * dt; s.y += s.vy * dt;
     s.fuel = Math.max(0, s.fuel - F / (ISP * G0) * dt);
-    if (i % 3 === 0) pts.push([s.x, s.y]);
-    if (s.y <= groundAt(s.x)) { pts.push([s.x, s.y]); break; }
+    if (i % 3 === 0) pts.push([s.x, s.y - COM_Y]);
+    if (s.y - COM_Y <= groundAt(s.x)) { pts.push([s.x, s.y - COM_Y]); break; }
   }
   return pts;
 }
@@ -235,12 +298,20 @@ function predictPath() {
 // ---------- update ----------
 function update(dt, p) {
   if (p.pressed[B.Y]) showPath = !showPath;
-  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); }
+  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); if (!assist) autoLand = false; }
   if (state === "play" && p.pressed[B.B]) toggleFuel();
+  if (state === "play" && p.pressed[B.L3]) toggleAutoLand();
+  // Small steps (1/240 s or less) keep the stiff leg springs stable
+  const sub = Math.ceil(dt * 240 - 1e-9);
   if (state === "play") {
-    const sub = 4;
     for (let i = 0; i < sub && state === "play"; i++) step(dt / sub, p);
     if (state === "play" && L.thr > 0.05) Pad.rumble(L.thr * 0.25, L.thr * 0.35, 160);
+    // Spoken altitude callouts and warnings (lander.js)
+    if (state === "play") Lander.voice.update({ alt: footAlt(), vUp: L.vy, g: world.g, amax: L.fuel > 0 ? maxThrust / (DRY + L.fuel) : 0, contact: L.feet > 0 });
+  } else if (state === "result" && result.tipped && result.simT < 8) {
+    // Let it finish falling over and come to rest
+    for (let i = 0; i < sub; i++) step(dt / sub, p);
+    result.simT += dt;
   }
   for (const q of parts) { q.vy -= world.g * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; if (q.y < groundAt(q.x)) { q.y = groundAt(q.x); q.vy *= -0.3; q.vx *= 0.6; } }
   parts = parts.filter(q => q.life > 0);
@@ -252,9 +323,9 @@ function update(dt, p) {
     }
   }
 
-  // Camera zooms in near the ground
-  const alt = L.y - groundAt(L.x);
-  const z = state === "title" ? 1 : alt < 18 ? 2.4 : alt < 30 ? 1.6 : 1;
+  // Camera zooms in smoothly as the ground gets close: about 22 m of view at touchdown
+  const alt = Math.max(0, footAlt());
+  const z = state === "title" ? 1 : clamp(70 / (alt * 1.6 + 20), 1, 3.2);
   cam.z += (z - cam.z) * Math.min(1, dt * 2.5);
   const k = S * cam.z, hw = W / (2 * k), hh = H / (2 * k);
   const tx = cam.z > 1.05 ? L.x : WW / 2, ty = cam.z > 1.05 ? L.y : WH / 2;
@@ -312,7 +383,7 @@ function drawWorld() {
   }
   ctx.globalAlpha = 1;
 
-  if (!(result && !result.ok)) drawLander();
+  if (!(result && !result.ok && !result.tipped)) drawLander();
 }
 
 function drawLander() {
@@ -321,6 +392,7 @@ function drawLander() {
   ctx.rotate(-L.th);
   const k = sl(1);
   ctx.scale(k, -k);  // draw in metres, y up
+  ctx.translate(0, -COM_Y);
   // flame
   if (L.thr > 0.02) {
     const len = 1.2 + L.thr * 4 * (0.85 + Math.random() * 0.3);
@@ -370,7 +442,7 @@ function gauge(x, y, label, value, ok, unit) {
 
 function drawHUD(p) {
   const m = DRY + L.fuel;
-  const alt = Math.max(0, L.y - groundAt(L.x));
+  const alt = Math.max(0, footAlt());
   // Panel sits top-right; the craft starts at the top-left
   ctx.save(); ctx.translate(W - 278, 0);
   ctx.fillStyle = "rgba(10,12,18,0.72)";
@@ -380,7 +452,7 @@ function drawHUD(p) {
   ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui, sans-serif";
   ctx.fillText(`g = ${world.g} m/s²   air ρ = ${world.rho} kg/m³`, 28, 60);
 
-  gauge(28, 86, "ALTITUDE", alt.toFixed(1), undefined, "m");
+  gauge(28, 86, "RADAR ALT", alt.toFixed(1), undefined, "m");
   gauge(140, 86, "VERTICAL", (L.vy >= 0 ? "↑" : "↓") + Math.abs(L.vy).toFixed(1), -L.vy <= SAFE_VY, "m/s");
   gauge(28, 136, "SIDEWAYS", (L.vx >= 0 ? "→" : "←") + Math.abs(L.vx).toFixed(1), Math.abs(L.vx) <= SAFE_VX, "m/s");
   gauge(140, 136, "TILT", Math.round(L.th * -180 / Math.PI) + "°", Math.abs(L.th) <= SAFE_TILT);
@@ -401,20 +473,29 @@ function drawHUD(p) {
   ctx.fillText(world.wind ? `WIND ${wind >= 0 ? "→" : "←"} ${Math.abs(wind).toFixed(1)} m/s` : "WIND none (no air)", 28, 306);
   ctx.fillText(`SCORE ${total}`, 160, 306);
   ctx.restore();
+  Lander.drawRadar(ctx, W - 264, 344, { alt, vUp: L.vy, g: world.g, amax: L.fuel > 0 ? maxThrust / m : 0, from: 60 });
 
   ctx.textAlign = "right"; ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "600 12px system-ui, sans-serif";
-  ctx.fillText(assist
-    ? "RT throttle · Left stick tilt · X assist off · Y path · B fuel ∞ · Start menu (PID tuning)"
+  ctx.fillText(autoLand
+    ? "Auto-land: stick ◀▶ drifts toward a spot · RT adds thrust · L3 auto-land off · B fuel ∞ · Start menu"
+    : assist
+    ? "RT throttle · Left stick tilt · L3 auto-land · X assist off · Y path · B fuel ∞ · Start menu (PID tuning)"
     : "RT throttle · Left stick rotate · LT auto-level · X assist on · Y path · B fuel ∞ · Start menu", W - 16, H - 16);
   const deg = a => Math.round(-a * 180 / Math.PI);   // positive = leaning right
   const err = Math.abs(Math.atan2(Math.sin(L.target - L.th), Math.cos(L.target - L.th))) * 180 / Math.PI;
   const rows = [
     { name: "Attitude hold (PID)", value: assist ? "ON" : "OFF", on: assist, key: "X" },
+    { name: "Auto-land", value: !autoLand ? "OFF" : L.feet ? "TOUCHDOWN" : "ACTIVE", on: autoLand, key: "L3 · click stick" },
     { name: "Auto-level (manual mode only)", value: assist ? "N/A" : p.lt > 0.05 ? "ACTIVE" : "READY", on: !assist && p.lt > 0.05, key: "hold LT" },
     { name: "Flight path preview", value: showPath ? "ON" : "OFF", on: showPath, key: "Y" },
     { name: "Unlimited fuel", value: infFuel ? "ON" : "OFF", on: infFuel, key: "B" },
   ];
-  Assist.drawStatus(ctx, 14, H - 30, assist ? {
+  Lander.voice.drawHint(ctx, Math.min(W / 2, W - 480), 44);   // clear of the telemetry panel
+  Assist.drawStatus(ctx, 14, H - 30, autoLand ? {
+    rows,
+    mode: L.feet ? "Auto-land: legs down, engine off, settling" : `Auto-land: descending at ${L.auto ? (-L.auto.vTarget).toFixed(1) : "–"} m/s target`,
+    detail: "Stick ◀▶ drifts toward a landing spot · RT adds thrust · L3 hands back control",
+  } : assist ? {
     rows,
     mode: Math.abs(L.target) < 0.01 ? "Holding upright (0°) · stick ◀▶ sets the tilt" : `Holding tilt ${deg(L.target)}° ${L.target < 0 ? "right" : "left"} · centre stick = upright`,
     detail: `Tilt now ${deg(L.th)}° · off by ${err.toFixed(1)}° · Kp ${Assist.gains.kp.toFixed(1)} Ki ${Assist.gains.ki.toFixed(2)} Kd ${Assist.gains.kd.toFixed(1)}`,
@@ -424,7 +505,7 @@ function drawHUD(p) {
     detail: "Spin keeps going until you counter it · X: assist on",
   });
   ctx.textAlign = "right"; ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "600 12px system-ui, sans-serif";
-  ctx.fillText(`Safe landing: fall < ${SAFE_VY} m/s · sideways < ${SAFE_VX} m/s · tilt < 11°`, W - 16, H - 34);
+  ctx.fillText(`Aim for: fall < ${SAFE_VY} m/s · sideways < ${SAFE_VX} m/s · upright. Legs break above ${Lander.LEG_BREAK} m/s; tilted or sliding landings can tip over`, W - 16, H - 34);
 }
 
 function panel(lines) {
@@ -459,8 +540,9 @@ function render(p) {
       ["GRAVITY LANDER", 44, "#4cc2ff", 900],
       ["Land softly on four real worlds: Moon, Mars, Titan, Earth.", 16],
       ["Real gravity, real air drag, and fuel mass that drops as you burn.", 16],
-      ["RT throttle · Left stick tilt (PID assist holds it) · X assist on/off · Y path", 15, "#8a92a3"],
-      [p.connected ? "A: landing practice · Y: orbit mission (Terra → Luna)" : "Connect a controller and press any button", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      ["RT throttle · Left stick tilt (PID assist holds it) · X assist on/off · L3 auto-land · Y path", 15, "#8a92a3"],
+      [p.connected ? `A: land on ${WORLDS[titleWorld].name} · Y: orbit mission (Terra → Luna)` : "Connect a controller and press any button", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      [unlocked > 1 ? `D-pad ◀ ▶ choose world: ${WORLDS.slice(0, unlocked).map((w, i) => i === titleWorld ? `[${w.name}]` : w.name).join("  ")}` : "Land on the Moon to unlock Mars, and so on", 14, "#c9d1e0"],
       ["B: back to hub · Start: menu", 13, "#5c6475"],
     ]);
     return;
@@ -472,13 +554,14 @@ function render(p) {
       panel([
         [result.pad ? "The Eagle has landed!" : "Landed (off the pad)", 34, "#3ddc84", 900],
         [`Touchdown at ${result.fall.toFixed(2)} m/s · ` + (infFuel ? "unlimited fuel" : `${Math.round(result.fuelPct * 100)}% fuel left`), 17],
+        [`Resting ${Math.round(Math.abs(result.tilt) * 180 / Math.PI)}° from upright on ground sloping ${Math.round(Math.abs(result.slope) * 180 / Math.PI)}°`, 14, "#8a92a3"],
         [result.pad ? `Pad bonus ×${result.pad.mult}` : "Land on a pad for a bonus multiplier", 16, "#ffb547"],
         [`+${result.points} points · total ${total}`, 22, "#fff", 800],
         [`Press A to fly to ${next} · B: hub`, 16, "#3ddc84"],
       ]);
     } else {
       panel([
-        ["Crashed", 38, "#ff6b5c", 900],
+        [result.tipped ? "Tipped over" : "Crashed", 38, "#ff6b5c", 900],
         [result.msg, 16],
         [world.note, 15, "#8a92a3"],
         ["Press A to try again · B: hub", 18, "#3ddc84", 700],
@@ -498,6 +581,23 @@ function toggleFuel() {
   if (infFuel && L) L.fuel = L.fuel0;
   Pad.setup({});   // refresh the menu label
 }
+function toggleAutoLand() {
+  autoLand = !autoLand;
+  if (autoLand) assist = true;
+  Assist.pid.reset();
+  Lander.voice.event(autoLand ? "autoOn" : "autoOff");
+  Pad.setup({});
+}
+
+// Worlds you've reached stay open: start from any of them
+const WORLD_KEY = "gravity-lander-worlds";
+let unlocked = 1, titleWorld = 0;
+try { unlocked = clamp(parseInt(localStorage.getItem(WORLD_KEY), 10) || 1, 1, WORLDS.length); } catch (e) {}
+function chooseWorld() {
+  Pad.submenu("Choose world", WORLDS.map((w, i) => i < unlocked
+    ? { label: `${w.name} · g ${w.g} m/s²`, action: () => { newLevel(i, 0); state = "play"; } }
+    : { label: `🔒 ${w.name}: land on ${WORLDS[i - 1].name} first`, keepOpen: true, action: () => {} }));
+}
 
 // ---------- main loop ----------
 Pad.setup({
@@ -507,7 +607,10 @@ Pad.setup({
     { label: "Resume", action: () => {} },
     { label: "Restart this world", action: () => { newLevel(levelIdx, round); state = "play"; } },
     { label: "Start over from the Moon", action: () => { total = 0; newLevel(0, 0); state = "play"; } },
+    { label: "Choose world…", keepOpen: true, action: chooseWorld },
+    { get label() { return `Auto-land: ${autoLand ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleAutoLand },
     { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
+    { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
     { label: "Tune attitude assist (PID)", action: () => { assist = true; Assist.open(); } },
     { label: "Orbit mission (Terra → Luna)", action: () => { location.href = "mission.html"; } },
   ],
@@ -526,7 +629,8 @@ function frame(now) {
   // The tuning panel takes the buttons; the flight keeps running on sticks and triggers
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
   if (p.connected && state !== "pause") {
-    if (state === "title" && p.pressed[B.A]) { total = 0; newLevel(0, 0); state = "play"; }
+    if (state === "title" && (p.pressed[B.LEFT] || p.pressed[B.RIGHT])) titleWorld = (titleWorld + (p.pressed[B.RIGHT] ? 1 : unlocked - 1)) % unlocked;
+    else if (state === "title" && p.pressed[B.A]) { total = 0; newLevel(titleWorld, 0); state = "play"; }
     else if (state === "title" && p.pressed[B.Y]) location.href = "mission.html";
     else if (state === "result" && p.pressed[B.A]) {
       if (result.ok) { const n = levelIdx + 1; newLevel(n % WORLDS.length, round + (n >= WORLDS.length ? 1 : 0)); }

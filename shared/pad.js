@@ -8,12 +8,14 @@
 //     canOpen():  optional; return false to stop Start/Back opening the menu
 //   Pad.poll() once per frame -> { connected, gp, id, down[], pressed[], lx, ly, rx, ry, lt, rt }
 //     While the menu is open, pressed[] is all false so the page ignores input.
+//   Pad.submenu(title, items): swap the open menu's items for a list with "← Back" (B goes back too)
 //   Pad.rumble(strong, weak, ms), Pad.stopRumble(), Pad.menuOpen()
 (function () {
   const BTN = { A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7, BACK: 8, START: 9, L3: 10, R3: 11, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
   const DEADZONE = 0.18, HOLD_MS = 800;
 
   let cfg = { hubUrl: "../../", title: "Menu", items: [], holdToOpen: false, onMenu: null };
+  let main = null;   // the main menu while a submenu is showing
   let prev = null, open = false, sel = 0, holdStart = 0, navRepeatAt = 0, lastFrame = -1, last = null;
   let overlay, list, holdBar, holdBox;
 
@@ -83,7 +85,19 @@
   }
 
   function allItems() {
+    if (main) return [...cfg.items, { label: "← Back", keepOpen: true, action: back }];
     return [...cfg.items, { label: "Back to hub", action: () => { stopRumble(); location.href = cfg.hubUrl; } }];
+  }
+
+  function submenu(title, items) {
+    if (!main) main = { title: cfg.title, items: cfg.items };
+    cfg.title = title; cfg.items = items; sel = 0;
+    if (open) render(); else setOpen(true);
+  }
+  function back() {
+    if (!main) return;
+    cfg.title = main.title; cfg.items = main.items; main = null; sel = 0;
+    if (open) render();
   }
 
   function render() {
@@ -103,6 +117,7 @@
   function setOpen(v) {
     if (v === open) return;
     open = v;
+    if (!open) back();
     if (open) { sel = 0; render(); stopRumble(); }
     overlay.classList.toggle("open", open);
     if (cfg.onMenu) cfg.onMenu(open);
@@ -170,6 +185,7 @@
 
     // Menu is open: it owns the input.
     res.pressed = res.down.map(() => false);
+    if (edge[BTN.B] && main) { back(); return res; }
     if (edge[BTN.B] || (!cfg.holdToOpen && (edge[BTN.START] || edge[BTN.BACK]))) { setOpen(false); return res; }
     if (edge[BTN.A]) { choose(sel); return res; }
     const n = allItems().length, now = performance.now();
@@ -185,6 +201,7 @@
   // Keyboard works in the menu too: arrows choose, Enter selects, Esc opens/closes
   window.addEventListener("keydown", e => {
     if (e.key === "Escape") {
+      if (open && main) { back(); e.preventDefault(); return; }
       if (open || !cfg.canOpen || cfg.canOpen()) setOpen(!open);
       e.preventDefault(); return;
     }
@@ -204,5 +221,5 @@
 
   if (document.body) buildUI(); else document.addEventListener("DOMContentLoaded", buildUI);
 
-  window.Pad = { BTN, setup, poll, rumble, stopRumble, menuOpen: () => open, openMenu: () => setOpen(true), closeMenu: () => setOpen(false) };
+  window.Pad = { BTN, setup, submenu, poll, rumble, stopRumble, menuOpen: () => open, openMenu: () => setOpen(true), closeMenu: () => setOpen(false) };
 })();

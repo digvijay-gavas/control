@@ -78,8 +78,9 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 |---|---|
 | [Trigger Storm](games/trigger-storm/) | Twin-stick shooter: RT pressure sets fire rate, LT pressure sets shield size, every button has a job. |
 | [Fruit Catch](games/fruit-catch/) | Easy and relaxed: move a basket to catch fruit, stars and hearts, and dodge bombs. Left stick or D-pad, RT for a speed boost. |
-| [Gravity Lander](games/gravity-lander/) | Real physics: land on the Moon, Mars, Titan and Earth using each world's real gravity and air density. Thrust follows the craft's tilt, fuel mass burns off by the rocket equation, and spin has inertia. RT throttle, stick sets the tilt, X toggles the PID attitude assist. |
-| [Orbit Mission](games/gravity-lander/mission.html) | Part of Gravity Lander (Y on its title screen). Six assignments from launch pad to a Luna landing: lift off, reach orbit, transfer, get captured, stable lunar orbit, land. Each one saves a checkpoint. See below. |
+| [Gravity Lander](games/gravity-lander/) | Real physics: land on the Moon, Mars, Titan and Earth using each world's real gravity and air density. Thrust follows the craft's tilt, fuel mass burns off by the rocket equation, and spin has inertia. RT throttle, stick sets the tilt, X toggles the PID attitude assist, L3 auto-land. Worlds you've landed on stay unlocked: pick one with the D-pad on the title screen or "Choose world" in the menu. |
+| [Orbit Mission](games/gravity-lander/mission.html) | Part of Gravity Lander (Y on its title screen). Six assignments from launch pad to a Luna landing: lift off, reach orbit, transfer, get captured, stable lunar orbit, land. Each one saves a checkpoint, and you can start from any checkpoint you've reached. See below. |
+| [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro, Y camera. The default chase camera turns with the car (nose always up, with a little lag), so stick left always looks like turning left; Y switches to a fixed map. Best lap is saved. |
 
 ### Orbit Mission physics
 
@@ -91,9 +92,21 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 - **Steering:** with the assist on, point the left stick where the nose should face on screen (stick up = nose up). Let go and the assist keeps that heading. An **Assists** panel at the bottom left lists every assist at once (attitude hold, direction lock, unlimited fuel, time warp) with its state and button, plus what the attitude assist is doing right now.
 - **Velocity vector:** a green arrow from the rocket shows where it's moving (relative to the body you're near) and how fast, in m/s. The length grows with the log of the speed, so slow and fast both fit. In the Rocket view, dashed arrows split it into climb/fall and sideways. Landing practice has the same arrow; parts over the safe touchdown limit turn red.
 - **Unlimited fuel:** a practice switch: **B** while flying, or the Start menu. Shared with landing mode. Tanks never drain; mass and thrust are unchanged, and there's no fuel bonus in the score.
+- **Terrain:** Terra and Luna have hills from 40 km wide down to 20 m bumps. Smooth plains are easy; rough highlands have slopes up to about 30°. Terra is flat around the launch pad.
 - **Steering aids:** a predicted path (including the Luna encounter), apoapsis and periapsis markers, the Luna phase angle, and D-pad holds for prograde, retrograde and radial.
+
+- **Checkpoints:** every assignment you reach saves one, and so does "Ready to land": the moment the radar altitude first appears over Luna on the landing assignment (if the engine can still stop the fall). Start from any of them with the D-pad on the title screen or "Choose checkpoint" in the Start menu. Locked ones show what's still to reach.
+
+### Landing (both modes)
+
+Shared code is in `games/gravity-lander/lander.js`.
+
+- **Radar altitude:** the height of the lowest leg above the ground right below it. It shows how fast you're falling, the time to impact, and when to brake ("Start braking", "BRAKE NOW"). In the mission it appears below an altitude that depends on gravity: 10 km on Luna, 25 km on Terra. Stronger gravity means braking has to start higher.
+- **Auto-land (L3, or the Start menu):** L3 means pressing the left stick straight in until it clicks. flies the descent for you. It brakes on a safe profile, kills sideways speed, stays nearly upright near the ground, and touches down at about 0.8 m/s. It cuts the engine once both legs are down. Push the stick left/right to drift toward a landing spot; RT adds thrust; L3 again hands back control. In the mission it takes over below the radar altitude while you're descending, even from a low orbit (it sheds the orbital speed itself).
+- **Touchdown is real physics:** each leg is a shock absorber (a spring with a damper), the hull is stiff, and friction grips the ground until it's overcome. You can land on slopes (all-terrain). Coming down tilted, sliding sideways or on steep ground can make the lander bounce, slide, or tip over and tumble. Legs break above 4 m/s, and the hull touching the ground means it fell over. It counts as landed once it's resting on its legs.
+- **Voice callouts:** a spoken voice calls out the radar altitude on the way down: 10, 5, 2 and 1 kilometres (in the mission), then 500, 300, 200, 100, 50, 40, 30, 20, 10 and 5 metres, then "Contact" and "Touchdown". Warning tones plus "Brake now!" when a full-throttle stop only just fits, and "Sink rate!" when you're falling faster than the legs can take near the ground. Tones also mark auto-land on/off, the ready-to-land checkpoint, tipping over and crashes. It uses the browser's built-in speech, so there are no sound files. Turn it off with "Sound (voice callouts)" in the Start menu; the setting is remembered. Browsers only allow sound after one mouse click or key press on the page (controller buttons don't count); the game shows a reminder until then.
+- **Zoom:** the camera zooms in smoothly as the ground gets close, down to about 22 m of view in landing practice and 50 m in the mission, so you can see the legs and the ground.
 
 ### Attitude assist (PID)
 
 `games/gravity-lander/assist.js` holds the craft at the angle the pilot asks for, using only the real rotation thrusters' strength. Tune Kp, Ki and Kd live from the Start menu ("Tune attitude assist"). A chart shows target vs actual angle, and a hint gives the critical-damping Kd (2·√Kp). The values are saved in the browser.
-| [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro, Y camera. The default chase camera turns with the car (nose always up, with a little lag), so stick left always looks like turning left; Y switches to a fixed map. Best lap is saved. |
