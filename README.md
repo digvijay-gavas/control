@@ -15,7 +15,7 @@ games/<id>/index.html    one folder per game
 Browsers only expose controllers to pages served over http(s), so start a local server in this folder:
 
 ```bash
-python -m http.server 8765 --bind 127.0.0.1
+python scripts/serve.py 8765
 ```
 
 Then open http://localhost:8765 and press any button on the controller.

@@ -2,8 +2,8 @@
 REM Starts the Controller Game Hub and opens it in the browser.
 REM
 REM   1. If the hub is already running, just opens it.
-REM   2. Otherwise looks for Python (py launcher, python, python3) and runs its
-REM      built-in web server. No extra Python packages are needed.
+REM   2. Otherwise looks for Python (py launcher, python, python3) and runs
+REM      scripts\serve.py, a small no-cache web server (standard library only).
 REM   3. No Python? Installs it once with winget (Windows' package manager).
 REM   4. Still none? Falls back to scripts\serve.ps1, which needs only the
 REM      PowerShell that ships with Windows.
@@ -44,7 +44,7 @@ if not defined PY (
 
 if defined PY (
   echo Starting the server with Python: %PY%
-  start "Game Hub server" /min %PY% -m http.server %HUB_PORT% --bind 127.0.0.1
+  start "Game Hub server" /min %PY% "%~dp0scripts\serve.py" %HUB_PORT%
 ) else (
   echo Starting the built-in PowerShell server instead.
   start "Game Hub server" /min powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\serve.ps1" -Port %HUB_PORT%
