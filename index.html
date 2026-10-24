@@ -3,245 +3,190 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gamepad Visualizer</title>
+<title>Controller Game Hub</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e6e8ee; --muted: #8a92a3;
-    --idle: #262b36; --active: #4cc2ff; --accent: #ffb547;
-    --a: #3ddc84; --b: #ff5c5c; --x: #4c9bff; --y: #ffd04c;
+    --idle: #262b36; --active: #4cc2ff; --ok: #3ddc84; --warn: #ffb547;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
-  header { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-  h1 { font-size: 18px; margin: 0; }
-  #status { color: var(--muted); }
-  main { padding: 20px; display: grid; gap: 20px; }
-  .pad { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr); gap: 20px; }
-  @media (max-width: 900px) { .pad { grid-template-columns: 1fr; } }
-  .pad h2 { grid-column: 1 / -1; font-size: 14px; margin: 0; font-weight: 600; word-break: break-word; }
-  .pad h2 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
-  svg { width: 100%; height: auto; }
-  svg .btn { fill: var(--idle); stroke: var(--line); stroke-width: 2; transition: fill 40ms; }
-  svg .body { fill: #1f232c; stroke: var(--line); stroke-width: 2; }
-  svg text { fill: var(--muted); font-size: 13px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
-  svg .well { fill: #14171d; stroke: var(--line); stroke-width: 2; }
-  svg .stick { fill: #3a4150; stroke: #596174; stroke-width: 2; }
-  svg .stick.pressed { fill: var(--active); }
-  svg .trail { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: .6; }
-  svg .tfill { fill: var(--accent); }
-  .raw h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 6px; margin-bottom: 16px; }
-  .cell { background: var(--idle); border-radius: 6px; padding: 6px 4px; text-align: center; font-variant-numeric: tabular-nums; position: relative; overflow: hidden; }
-  .cell .lvl { position: absolute; left: 0; bottom: 0; height: 100%; background: var(--active); opacity: .35; }
-  .cell.on { outline: 2px solid var(--active); }
-  .cell b { display: block; font-size: 11px; color: var(--muted); position: relative; }
-  .cell span { position: relative; font-size: 12px; }
-  .axis { display: grid; grid-template-columns: 56px 1fr 56px; gap: 8px; align-items: center; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
-  .axis .bar { height: 10px; background: var(--idle); border-radius: 5px; position: relative; }
-  .axis .bar i { position: absolute; top: 0; bottom: 0; background: var(--active); border-radius: 5px; }
-  .axis .bar::after { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--muted); }
-  .axis span:last-child { text-align: right; }
-  .controls { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
-  button.ui { background: var(--idle); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
-  button.ui:hover { border-color: var(--active); }
-  .empty { color: var(--muted); padding: 40px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; min-height: 100vh; }
+  header { padding: 28px 24px 8px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0; }
+
+  .pad-status { max-width: 1100px; margin: 20px auto 0; padding: 0 24px; }
+  .status-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .status-text { flex: 1 1 220px; min-width: 0; }
+  .status-text b { display: block; }
+  .status-text span { color: var(--muted); font-size: 13px; word-break: break-word; }
+  .mini { display: flex; gap: 14px; align-items: center; }
+  .stick { width: 40px; height: 40px; border-radius: 50%; background: var(--idle); position: relative; }
+  .stick i { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: var(--active); left: 13px; top: 13px; }
+  .trig { width: 14px; height: 40px; background: var(--idle); border-radius: 4px; position: relative; overflow: hidden; }
+  .trig i { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: var(--warn); }
+  .mini small { color: var(--muted); font-size: 11px; display: block; text-align: center; margin-top: 3px; }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 8px 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .card { display: flex; flex-direction: column; background: var(--panel); border: 2px solid var(--line); border-radius: 14px; overflow: hidden; color: inherit; text-decoration: none; transition: transform .12s, border-color .12s; outline: none; }
+  .card:hover, .card.focus { border-color: var(--c, var(--active)); transform: translateY(-3px); }
+  .card.focus { box-shadow: 0 0 0 4px color-mix(in srgb, var(--c, var(--active)) 25%, transparent); }
+  .art { height: 120px; position: relative; background:
+      radial-gradient(circle at 30% 40%, color-mix(in srgb, var(--c) 55%, transparent), transparent 55%),
+      radial-gradient(circle at 75% 70%, color-mix(in srgb, var(--c) 30%, transparent), transparent 50%),
+      #12151b; }
+  .art svg { position: absolute; right: 16px; bottom: 12px; width: 56px; height: 56px; opacity: .9; }
+  .body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+  .body h3 { margin: 0; font-size: 18px; }
+  .body p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tags span { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--idle); color: #c9d1e0; }
+  .card.soon { border-style: dashed; opacity: .6; pointer-events: none; }
+  .card.soon .art { background: #12151b; }
+
+  footer { color: var(--muted); font-size: 13px; text-align: center; padding: 8px 24px 32px; }
+  kbd { background: var(--idle); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; color: var(--text); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Gamepad Visualizer</h1>
-  <span id="status">Waiting for a controller. Press any button on it.</span>
-  <a href="game.html" style="margin-left:auto;color:var(--active)">Play Trigger Storm →</a>
+  <h1>Controller Game Hub</h1>
+  <p class="sub">Pick a game, or open the tester to check every button, stick and trigger.</p>
 </header>
-<main id="pads">
-  <div class="empty" id="empty">No controller detected yet. Browsers only expose a gamepad after you press one of its buttons while this page is focused.</div>
+
+<section class="pad-status">
+  <div class="status-box">
+    <div class="dot" id="dot"></div>
+    <div class="status-text">
+      <b id="pad-name">No controller detected</b>
+      <span id="pad-hint">Connect your controller and press any button on it.</span>
+    </div>
+    <div class="mini" aria-hidden="true">
+      <div><div class="trig"><i id="lt"></i></div><small>LT</small></div>
+      <div><div class="stick"><i id="ls"></i></div><small>LS</small></div>
+      <div><div class="stick"><i id="rs"></i></div><small>RS</small></div>
+      <div><div class="trig"><i id="rt"></i></div><small>RT</small></div>
+    </div>
+  </div>
+</section>
+
+<main>
+  <h2>Tools</h2>
+  <div class="grid" id="tools"></div>
+  <h2>Games</h2>
+  <div class="grid" id="games"></div>
 </main>
 
-<template id="pad-tpl">
-  <section class="pad">
-    <h2><span class="name"></span><small class="meta"></small></h2>
-    <div>
-      <svg viewBox="0 0 640 400" aria-label="Controller layout">
-        <!-- triggers -->
-        <rect class="well" x="110" y="8" width="90" height="34" rx="8"/>
-        <rect class="tfill" data-trig="6" x="110" y="8" width="0" height="34" rx="8"/>
-        <text x="155" y="25">LT</text>
-        <rect class="well" x="440" y="8" width="90" height="34" rx="8"/>
-        <rect class="tfill" data-trig="7" x="440" y="8" width="0" height="34" rx="8"/>
-        <text x="485" y="25">RT</text>
-        <!-- bumpers -->
-        <rect class="btn" data-btn="4" x="100" y="50" width="110" height="26" rx="10"/><text x="155" y="63">LB</text>
-        <rect class="btn" data-btn="5" x="430" y="50" width="110" height="26" rx="10"/><text x="485" y="63">RB</text>
-        <!-- body -->
-        <path class="body" d="M140 86 H500 C590 86 630 170 630 260 C630 350 580 392 540 392 C500 392 470 330 430 310 H210 C170 330 140 392 100 392 C60 392 10 350 10 260 C10 170 50 86 140 86 Z"/>
-        <!-- left stick -->
-        <circle class="well" cx="155" cy="170" r="52"/>
-        <path class="trail" data-trail="0"/>
-        <circle class="stick" data-stick="0" cx="155" cy="170" r="24"/>
-        <!-- d-pad -->
-        <rect class="btn" data-btn="12" x="225" y="232" width="34" height="38" rx="5"/>
-        <rect class="btn" data-btn="13" x="225" y="306" width="34" height="38" rx="5"/>
-        <rect class="btn" data-btn="14" x="187" y="270" width="38" height="36" rx="5"/>
-        <rect class="btn" data-btn="15" x="259" y="270" width="38" height="36" rx="5"/>
-        <rect x="225" y="270" width="34" height="36" fill="#262b36"/>
-        <text x="242" y="251">▲</text><text x="242" y="325">▼</text><text x="206" y="288">◀</text><text x="278" y="288">▶</text>
-        <!-- center -->
-        <rect class="btn" data-btn="8" x="252" y="150" width="40" height="22" rx="11"/><text x="272" y="186" style="font-size:11px">Back</text>
-        <rect class="btn" data-btn="9" x="348" y="150" width="40" height="22" rx="11"/><text x="368" y="186" style="font-size:11px">Start</text>
-        <circle class="btn" data-btn="16" cx="320" cy="120" r="18"/><text x="320" y="120">⌂</text>
-        <!-- right stick -->
-        <circle class="well" cx="400" cy="290" r="52"/>
-        <path class="trail" data-trail="1"/>
-        <circle class="stick" data-stick="1" cx="400" cy="290" r="24"/>
-        <!-- face buttons -->
-        <circle class="btn" data-btn="3" data-color="--y" cx="485" cy="130" r="22"/><text x="485" y="130">Y</text>
-        <circle class="btn" data-btn="2" data-color="--x" cx="440" cy="175" r="22"/><text x="440" y="175">X</text>
-        <circle class="btn" data-btn="1" data-color="--b" cx="530" cy="175" r="22"/><text x="530" y="175">B</text>
-        <circle class="btn" data-btn="0" data-color="--a" cx="485" cy="220" r="22"/><text x="485" y="220">A</text>
-      </svg>
-      <div class="controls">
-        <button class="ui" data-act="rumble">Test vibration</button>
-        <button class="ui" data-act="clear">Clear stick trails</button>
-      </div>
-    </div>
-    <div class="raw">
-      <h3>Buttons</h3>
-      <div class="grid buttons"></div>
-      <h3>Axes</h3>
-      <div class="axes"></div>
-    </div>
-  </section>
-</template>
+<footer>Controller: <kbd>D-pad</kbd> or <kbd>Left stick</kbd> to choose, <kbd>A</kbd> to open. In a game, pause and press <kbd>B</kbd> to come back here.</footer>
 
+<script src="games.js"></script>
 <script>
-// Labels for the W3C "standard" mapping; other controllers fall back to indices.
-const STD_NAMES = ["A","B","X","Y","LB","RB","LT","RT","Back","Start","LS","RS","Up","Down","Left","Right","Home"];
-const AXIS_NAMES = ["LX","LY","RX","RY"];
-const TRAIL_LEN = 60;
-const views = new Map();
+const ICON_TESTER = '<svg viewBox="0 0 64 64" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M18 20h28c8 0 13 8 14 18s-3 14-7 14c-4 0-6-6-10-8H21c-4 2-6 8-10 8s-8-4-7-14 6-18 14-18z"/><path d="M20 30v8M16 34h8"/><circle cx="44" cy="31" r="2" fill="#fff"/><circle cx="49" cy="36" r="2" fill="#fff"/></svg>';
+const ICON_GAME = '<svg viewBox="0 0 64 64" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"><path d="M32 8l22 40H10z"/><path d="M32 26v10M32 42v1"/></svg>';
 
-const $status = document.getElementById("status");
-const $pads = document.getElementById("pads");
-const $empty = document.getElementById("empty");
+function card({ title, description, path, color, tags = [] }, icon) {
+  const a = document.createElement("a");
+  a.className = "card";
+  a.href = path;
+  a.style.setProperty("--c", color);
+  a.innerHTML = `<div class="art">${icon}</div><div class="body"><h3></h3><p></p><div class="tags"></div></div>`;
+  a.querySelector("h3").textContent = title;
+  a.querySelector("p").textContent = description;
+  const t = a.querySelector(".tags");
+  tags.forEach(tag => { const s = document.createElement("span"); s.textContent = tag; t.appendChild(s); });
+  return a;
+}
 
-function createView(gp) {
-  const node = document.getElementById("pad-tpl").content.firstElementChild.cloneNode(true);
-  const std = gp.mapping === "standard";
-  node.querySelector(".name").textContent = `#${gp.index} ${gp.id}`;
-  node.querySelector(".meta").textContent =
-    `${std ? "standard mapping" : "non-standard mapping (layout may not match)"} · ${gp.buttons.length} buttons · ${gp.axes.length} axes`;
+document.getElementById("tools").appendChild(card({
+  title: "Controller Tester",
+  description: "Live view of every button, trigger and stick, with exact values. Use it to check the controller works.",
+  path: "tester/",
+  color: "#3ddc84",
+  tags: ["All inputs", "Vibration test"],
+}, ICON_TESTER));
 
-  const btnGrid = node.querySelector(".buttons");
-  const cells = gp.buttons.map((_, i) => {
-    const c = document.createElement("div");
-    c.className = "cell";
-    c.innerHTML = `<div class="lvl" style="width:0"></div><b>${std && STD_NAMES[i] ? STD_NAMES[i] : "B" + i}</b><span>0.00</span>`;
-    btnGrid.appendChild(c);
-    return { el: c, lvl: c.querySelector(".lvl"), val: c.querySelector("span") };
+const gamesEl = document.getElementById("games");
+(window.GAMES || []).forEach(g => gamesEl.appendChild(card(g, ICON_GAME)));
+const soon = card({ title: "More games coming", description: "New games will appear here.", path: "#", color: "#2a2f3a" }, "");
+soon.classList.add("soon");
+soon.tabIndex = -1;
+gamesEl.appendChild(soon);
+
+// ---------- controller: live status + grid navigation ----------
+const cards = () => [...document.querySelectorAll(".card:not(.soon)")];
+let focus = 0, prev = null, repeatAt = 0;
+
+function setFocus(i) {
+  const list = cards();
+  focus = (i + list.length) % list.length;
+  list.forEach((c, j) => c.classList.toggle("focus", j === focus));
+  list[focus].focus({ preventScroll: true });
+  list[focus].scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// Move to the card visually closest in the given direction.
+function move(dx, dy) {
+  const list = cards(), cur = list[focus].getBoundingClientRect();
+  const cx = cur.left + cur.width / 2, cy = cur.top + cur.height / 2;
+  let best = -1, bestScore = Infinity;
+  list.forEach((c, i) => {
+    if (i === focus) return;
+    const r = c.getBoundingClientRect(), x = r.left + r.width / 2 - cx, y = r.top + r.height / 2 - cy;
+    const along = x * dx + y * dy;
+    if (along <= 0) return;
+    const score = along + Math.abs(x * dy - y * dx) * 2;
+    if (score < bestScore) { bestScore = score; best = i; }
   });
+  if (best >= 0) setFocus(best);
+}
 
-  const axesBox = node.querySelector(".axes");
-  const axes = gp.axes.map((_, i) => {
-    const row = document.createElement("div");
-    row.className = "axis";
-    row.innerHTML = `<span>${std && AXIS_NAMES[i] ? AXIS_NAMES[i] : "Axis " + i}</span><div class="bar"><i></i></div><span>0.000</span>`;
-    axesBox.appendChild(row);
-    return { bar: row.querySelector("i"), val: row.querySelector("span:last-child") };
-  });
+function place(el, x, y) { el.style.transform = `translate(${x * 13}px, ${y * 13}px)`; }
 
-  const view = {
-    node, cells, axes,
-    svgBtns: [...node.querySelectorAll("[data-btn]")],
-    trig: [...node.querySelectorAll("[data-trig]")],
-    sticks: [...node.querySelectorAll("[data-stick]")].map(s => ({
-      el: s, cx: +s.getAttribute("cx"), cy: +s.getAttribute("cy"),
-      trail: node.querySelector(`[data-trail="${s.dataset.stick}"]`), pts: []
-    })),
-  };
+function tick(now) {
+  const gp = [...navigator.getGamepads()].find(g => g && g.connected);
+  document.getElementById("dot").classList.toggle("on", !!gp);
+  document.getElementById("pad-name").textContent = gp ? "Controller connected" : "No controller detected";
+  document.getElementById("pad-hint").textContent = gp ? gp.id : "Connect your controller and press any button on it.";
 
-  node.querySelector('[data-act="rumble"]').onclick = () => {
-    const g = navigator.getGamepads()[gp.index];
-    const act = g && g.vibrationActuator;
-    if (act && act.playEffect) {
-      act.playEffect("dual-rumble", { duration: 600, strongMagnitude: 1, weakMagnitude: 1 }).catch(() => {});
-    } else {
-      alert("This controller or browser does not support vibration.");
+  if (gp) {
+    const ax = gp.axes, b = gp.buttons;
+    if (!document.querySelector(".card.focus")) {
+      setFocus(focus);
+      // Clear any vibration a game left running (some receivers miss the stop).
+      if (gp.vibrationActuator && gp.vibrationActuator.reset) gp.vibrationActuator.reset().catch(() => {});
     }
-  };
-  node.querySelector('[data-act="clear"]').onclick = () => view.sticks.forEach(s => { s.pts = []; s.trail.setAttribute("d", ""); });
+    place(document.getElementById("ls"), ax[0] || 0, ax[1] || 0);
+    place(document.getElementById("rs"), ax[2] || 0, ax[3] || 0);
+    document.getElementById("lt").style.height = ((b[6] && b[6].value) || 0) * 100 + "%";
+    document.getElementById("rt").style.height = ((b[7] && b[7].value) || 0) * 100 + "%";
 
-  $pads.appendChild(node);
-  return view;
-}
-
-function update(view, gp) {
-  gp.buttons.forEach((b, i) => {
-    const c = view.cells[i];
-    if (!c) return;
-    c.el.classList.toggle("on", b.pressed);
-    c.lvl.style.width = (b.value * 100) + "%";
-    c.val.textContent = b.value.toFixed(2);
-  });
-
-  gp.axes.forEach((v, i) => {
-    const a = view.axes[i];
-    if (!a) return;
-    const left = Math.min(50, 50 + v * 50), width = Math.abs(v) * 50;
-    a.bar.style.left = left + "%";
-    a.bar.style.width = width + "%";
-    a.val.textContent = v.toFixed(3);
-  });
-
-  if (gp.mapping !== "standard") return;
-
-  view.svgBtns.forEach(el => {
-    const b = gp.buttons[+el.dataset.btn];
-    const color = el.dataset.color ? `var(${el.dataset.color})` : "var(--active)";
-    el.style.fill = b && b.pressed ? color : "";
-  });
-
-  view.trig.forEach(el => {
-    const b = gp.buttons[+el.dataset.trig];
-    el.setAttribute("width", b ? 90 * b.value : 0);
-  });
-
-  view.sticks.forEach((s, i) => {
-    const x = gp.axes[i * 2] || 0, y = gp.axes[i * 2 + 1] || 0;
-    const px = s.cx + x * 28, py = s.cy + y * 28;
-    s.el.setAttribute("cx", px);
-    s.el.setAttribute("cy", py);
-    const pressed = gp.buttons[10 + i];
-    s.el.classList.toggle("pressed", !!(pressed && pressed.pressed));
-    s.pts.push(`${px.toFixed(1)},${py.toFixed(1)}`);
-    if (s.pts.length > TRAIL_LEN) s.pts.shift();
-    s.trail.setAttribute("d", "M" + s.pts.join(" L"));
-  });
-}
-
-function loop() {
-  const pads = [...navigator.getGamepads()].filter(Boolean);
-  const seen = new Set();
-  for (const gp of pads) {
-    seen.add(gp.index);
-    let view = views.get(gp.index);
-    if (!view) { view = createView(gp); views.set(gp.index, view); }
-    update(view, gp);
+    const down = b.map(x => x.pressed);
+    // Ignore buttons already held when the page loaded (e.g. B from leaving a game).
+    if (!prev) prev = down.slice();
+    const pressed = i => down[i] && !prev[i];
+    const openNow = pressed(0);
+    const lx = ax[0] || 0, ly = ax[1] || 0;
+    const dir = { x: (down[15] || lx > 0.6 ? 1 : 0) - (down[14] || lx < -0.6 ? 1 : 0),
+                  y: (down[13] || ly > 0.6 ? 1 : 0) - (down[12] || ly < -0.6 ? 1 : 0) };
+    const anyDirNew = [12, 13, 14, 15].some(pressed);
+    if ((dir.x || dir.y) && (anyDirNew || now > repeatAt)) {
+      if (dir.x) move(dir.x, 0); else move(0, dir.y);
+      repeatAt = now + (anyDirNew || !prev.dirHeld ? 350 : 160);
+    }
+    prev = down;
+    prev.dirHeld = !!(dir.x || dir.y);
+    if (openNow) {
+      const el = document.querySelector(".card.focus") || cards()[0];
+      location.href = el.href;
+    }
   }
-  for (const [idx, view] of views) {
-    if (!seen.has(idx)) { view.node.remove(); views.delete(idx); }
-  }
-  $empty.style.display = pads.length ? "none" : "";
-  $status.textContent = pads.length
-    ? `${pads.length} controller${pads.length > 1 ? "s" : ""} connected`
-    : "Waiting for a controller. Press any button on it.";
-  requestAnimationFrame(loop);
+  requestAnimationFrame(tick);
 }
-
-if (!navigator.getGamepads) {
-  $empty.textContent = "This browser does not support the Gamepad API.";
-} else {
-  requestAnimationFrame(loop);
-}
+requestAnimationFrame(tick);
 </script>
 </body>
 </html>
