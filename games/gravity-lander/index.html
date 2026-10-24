@@ -17,6 +17,7 @@
 <script src="../../shared/pad.js"></script>
 <script src="assist.js"></script>
 <script src="lander.js"></script>
+<script src="launcher.js"></script>
 <script>
 // Gravity Lander: land on real worlds with real physics.
 //   RT          main engine throttle (analog)
@@ -27,7 +28,7 @@
 //   B           unlimited fuel on/off (while flying)
 //   LT          manual mode only: auto-level (analog: squeeze harder, stronger correction)
 //   Y           show / hide predicted path
-//   A           start, next world, retry · D-pad ◀▶ on the title picks a world you've reached
+//   A           next world, retry · start screens: choose mode, then world, or settings
 //   Start/Back  menu · B on title or result screen returns to the hub
 //
 // Physics, in SI units:
@@ -64,8 +65,9 @@ const POINTS = [...FEET.map(([x, y]) => ({ x, y: y - COM_Y, foot: true })), ...B
 const SAFE_VY = 2.5, SAFE_VX = 1.5, SAFE_TILT = 11 * Math.PI / 180, SAFE_SPIN = 0.6;
 const MAX_ALPHA = 1.8;                 // rotation thrusters' angular acceleration with a full tank, rad/s²
 const MAX_TILT = 40 * Math.PI / 180;   // assist: full stick asks for this much tilt
-let assist = true;                     // X toggles attitude assist (PID angle hold) / manual
-let autoLand = false;                  // L3: the autopilot flies the descent
+// Settings are saved and shared with the orbit mission (launcher.js)
+let assist = Launcher.settings.assist;     // X toggles attitude assist (PID angle hold) / manual
+let autoLand = Launcher.settings.autoLand; // L3: the autopilot flies the descent
 
 const WORLDS = [
   { name: "Moon",  g: 1.62, rho: 0,     wind: 0,  pads: 3, padMin: 10, sky: ["#020308", "#10131d"], ground: "#9a9ca3", dark: "#5d6067", note: "No air at all: nothing slows you down but your engine." },
@@ -74,7 +76,7 @@ const WORLDS = [
   { name: "Earth", g: 9.81, rho: 1.225, wind: 9,  pads: 2, padMin: 8,  sky: ["#2f6fc4", "#b5defc"], ground: "#4f8a3a", dark: "#33602a", note: "Six times the Moon's gravity: start braking early." },
 ];
 
-let state = "title", levelIdx = 0, round = 0, total = 0, showPath = true;
+let state = "title", levelIdx = 0, round = 0, total = 0, showPath = Launcher.settings.showPath;
 let world, terrain, pads, stars, L, maxThrust, windBase, t, parts, result, cam;
 
 // ---------- level setup ----------
@@ -267,7 +269,8 @@ function touchdown() {
   result = { ok: true, points, pad, fall, fuelPct, slope: slopeAt(L.x), tilt: L.th };
   state = "result";
   if (levelIdx + 2 > unlocked) unlocked = Math.min(WORLDS.length, levelIdx + 2);
-  try { localStorage.setItem(WORLD_KEY, String(unlocked)); } catch (e) {}
+  landed[levelIdx] = true;
+  try { localStorage.setItem(WORLD_KEY, String(unlocked)); localStorage.setItem(LANDED_KEY, JSON.stringify(landed)); } catch (e) {}
   Pad.rumble(0.25, 0.35, 160);
   Lander.voice.event("landed");
 }
@@ -297,8 +300,8 @@ function predictPath() {
 
 // ---------- update ----------
 function update(dt, p) {
-  if (p.pressed[B.Y]) showPath = !showPath;
-  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); if (!assist) autoLand = false; }
+  if (p.pressed[B.Y]) togglePath();
+  if (p.pressed[B.X]) toggleAssist();
   if (state === "play" && p.pressed[B.B]) toggleFuel();
   if (state === "play" && p.pressed[B.L3]) toggleAutoLand();
   // Small steps (1/240 s or less) keep the stiff leg springs stable
@@ -536,15 +539,11 @@ function render(p) {
     ]);
   }
   if (state === "title") {
-    panel([
-      ["GRAVITY LANDER", 44, "#4cc2ff", 900],
-      ["Land softly on four real worlds: Moon, Mars, Titan, Earth.", 16],
-      ["Real gravity, real air drag, and fuel mass that drops as you burn.", 16],
-      ["RT throttle · Left stick tilt (PID assist holds it) · X assist on/off · L3 auto-land · Y path", 15, "#8a92a3"],
-      [p.connected ? `A: land on ${WORLDS[titleWorld].name} · Y: orbit mission (Terra → Luna)` : "Connect a controller and press any button", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
-      [unlocked > 1 ? `D-pad ◀ ▶ choose world: ${WORLDS.slice(0, unlocked).map((w, i) => i === titleWorld ? `[${w.name}]` : w.name).join("  ")}` : "Land on the Moon to unlock Mars, and so on", 14, "#c9d1e0"],
-      ["B: back to hub · Start: menu", 13, "#5c6475"],
-    ]);
+    Launcher.draw(ctx, W, H, screen);
+    if (!p.connected) {
+      ctx.textAlign = "center"; ctx.fillStyle = "#ffb547"; ctx.font = "700 15px system-ui, sans-serif";
+      ctx.fillText("Connect a controller and press any button (or use the keyboard / mouse)", W / 2, H - 24);
+    }
     return;
   }
   drawHUD(p);
@@ -557,14 +556,14 @@ function render(p) {
         [`Resting ${Math.round(Math.abs(result.tilt) * 180 / Math.PI)}° from upright on ground sloping ${Math.round(Math.abs(result.slope) * 180 / Math.PI)}°`, 14, "#8a92a3"],
         [result.pad ? `Pad bonus ×${result.pad.mult}` : "Land on a pad for a bonus multiplier", 16, "#ffb547"],
         [`+${result.points} points · total ${total}`, 22, "#fff", 800],
-        [`Press A to fly to ${next} · B: hub`, 16, "#3ddc84"],
+        [`Press A to fly to ${next} · B: choose world`, 16, "#3ddc84"],
       ]);
     } else {
       panel([
         [result.tipped ? "Tipped over" : "Crashed", 38, "#ff6b5c", 900],
         [result.msg, 16],
         [world.note, 15, "#8a92a3"],
-        ["Press A to try again · B: hub", 18, "#3ddc84", 700],
+        ["Press A to try again · B: choose world", 18, "#3ddc84", 700],
       ]);
     }
   }
@@ -581,23 +580,68 @@ function toggleFuel() {
   if (infFuel && L) L.fuel = L.fuel0;
   Pad.setup({});   // refresh the menu label
 }
+function saveSettings() { Launcher.saveSettings({ assist, autoLand, showPath }); Pad.setup({}); }
 function toggleAutoLand() {
   autoLand = !autoLand;
   if (autoLand) assist = true;
   Assist.pid.reset();
   Lander.voice.event(autoLand ? "autoOn" : "autoOff");
-  Pad.setup({});
+  saveSettings();
 }
+function toggleAssist() { assist = !assist; Assist.pid.reset(); if (!assist) autoLand = false; saveSettings(); }
+function togglePath() { showPath = !showPath; saveSettings(); }
 
-// Worlds you've reached stay open: start from any of them
-const WORLD_KEY = "gravity-lander-worlds";
-let unlocked = 1, titleWorld = 0;
+// Worlds you've reached stay open: start from any of them. Landed ones get a tick.
+const WORLD_KEY = "gravity-lander-worlds", LANDED_KEY = "gravity-lander-landed";
+let unlocked = 1, landed = [];
 try { unlocked = clamp(parseInt(localStorage.getItem(WORLD_KEY), 10) || 1, 1, WORLDS.length); } catch (e) {}
+try { landed = JSON.parse(localStorage.getItem(LANDED_KEY) || "[]") || []; } catch (e) {}
+for (let i = 0; i < unlocked - 1; i++) landed[i] = true;   // unlocking the next world means you landed here
+function flyTo(i) { total = 0; newLevel(i, 0); state = "play"; screen = null; }
 function chooseWorld() {
   Pad.submenu("Choose world", WORLDS.map((w, i) => i < unlocked
-    ? { label: `${w.name} · g ${w.g} m/s²`, action: () => { newLevel(i, 0); state = "play"; } }
+    ? { label: `${landed[i] ? "✓ " : ""}${w.name} · g ${w.g} m/s²`, action: () => flyTo(i) }
     : { label: `🔒 ${w.name}: land on ${WORLDS[i - 1].name} first`, keepOpen: true, action: () => {} }));
 }
+
+// ---------- start screens (launcher.js) ----------
+// Choose the mode, then a world (or a mission checkpoint, on mission.html), or settings
+let screen = null;
+function modeScreen() {
+  return { title: "GRAVITY LANDER", sel: 0,
+    lines: ["Real rocket physics: gravity, air drag, fuel mass that drops as you burn."],
+    items: [
+      { label: "Landing practice", note: "Land on the Moon, Mars, Titan and Earth", action: () => { screen = worldsScreen(); } },
+      { label: "Orbit mission: Terra → Luna", note: "Launch, reach orbit, transfer, get captured, land on Luna. Checkpoints all the way", action: () => { location.href = "mission.html"; } },
+      { label: "Settings", note: "Assists, auto-land, unlimited fuel, sound", action: () => { screen = settings(modeScreen); } },
+      { label: "Back to hub", action: () => { location.href = "../../"; } },
+    ] };
+}
+function worldsScreen() {
+  const items = WORLDS.map((w, i) => i < unlocked
+    ? { label: w.name, status: landed[i] ? "done" : "open", value: landed[i] ? "landed" : "new", note: `g = ${w.g} m/s² · ${w.note}`, action: () => flyTo(i) }
+    : { label: w.name, status: "locked", note: `Land on ${WORLDS[i - 1].name} to unlock` });
+  items.push({ label: "Settings", note: "Assists, auto-land, unlimited fuel, sound", action: () => { screen = settings(worldsScreen); } });
+  items.push({ label: "← Back: choose mode", action: () => { screen = modeScreen(); } });
+  return { title: "LANDING PRACTICE", sel: Math.min(unlocked - 1, WORLDS.length - 1),
+    lines: ["Touch down gently and upright. Legs take 4 m/s; tilted or sliding landings can tip over.",
+            "RT throttle · stick tilt · X assist · L3 auto-land · Y path · B unlimited fuel · Start menu"], items };
+}
+function settings(backTo) {
+  return Launcher.settingsScreen({
+    toggleAssist, toggleAutoLand, toggleFuel, togglePath,
+    tune: () => { assist = true; saveSettings(); Assist.open(); },
+    back: () => { screen = backTo(); },
+    getAssist: () => assist, getAutoLand: () => autoLand, getFuel: () => infFuel, getPath: () => showPath,
+  });
+}
+function screenBack() {
+  if (!screen) return;
+  if (screen.title === "GRAVITY LANDER") location.href = "../../";
+  else if (screen.title === "LANDING PRACTICE") screen = modeScreen();
+  else screen.items[screen.items.length - 1].action();   // settings: its own Back
+}
+Launcher.attach(() => state === "title" && !Assist.isOpen() ? screen : null, screenBack);
 
 // ---------- main loop ----------
 Pad.setup({
@@ -608,10 +652,11 @@ Pad.setup({
     { label: "Restart this world", action: () => { newLevel(levelIdx, round); state = "play"; } },
     { label: "Start over from the Moon", action: () => { total = 0; newLevel(0, 0); state = "play"; } },
     { label: "Choose world…", keepOpen: true, action: chooseWorld },
+    { label: "Main menu (mode, worlds, settings)", action: () => { state = "title"; screen = modeScreen(); } },
     { get label() { return `Auto-land: ${autoLand ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleAutoLand },
     { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
     { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
-    { label: "Tune attitude assist (PID)", action: () => { assist = true; Assist.open(); } },
+    { label: "Tune attitude assist (PID)", action: () => { assist = true; saveSettings(); Assist.open(); } },
     { label: "Orbit mission (Terra → Luna)", action: () => { location.href = "mission.html"; } },
   ],
   canOpen: () => !Assist.isOpen(),
@@ -622,6 +667,7 @@ Pad.setup({
 });
 
 newLevel(0, 0);
+screen = location.hash === "#practice" ? worldsScreen() : modeScreen();
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.033, (now - last) / 1000); last = now;
@@ -629,15 +675,13 @@ function frame(now) {
   // The tuning panel takes the buttons; the flight keeps running on sticks and triggers
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
   if (p.connected && state !== "pause") {
-    if (state === "title" && (p.pressed[B.LEFT] || p.pressed[B.RIGHT])) titleWorld = (titleWorld + (p.pressed[B.RIGHT] ? 1 : unlocked - 1)) % unlocked;
-    else if (state === "title" && p.pressed[B.A]) { total = 0; newLevel(titleWorld, 0); state = "play"; }
-    else if (state === "title" && p.pressed[B.Y]) location.href = "mission.html";
+    if (state === "title") { if (!Assist.isOpen()) Launcher.handle(p, screen, screenBack); update(dt, p); }
     else if (state === "result" && p.pressed[B.A]) {
       if (result.ok) { const n = levelIdx + 1; newLevel(n % WORLDS.length, round + (n >= WORLDS.length ? 1 : 0)); }
       else newLevel(levelIdx, round);
       state = "play";
     }
-    else if ((state === "title" || state === "result") && p.pressed[B.B]) location.href = "../../";
+    else if (state === "result" && p.pressed[B.B]) { state = "title"; screen = worldsScreen(); }
     else update(dt, p);
   } else if (state === "title") update(dt, p);
   render(p);

@@ -17,6 +17,7 @@
 <script src="../../shared/pad.js"></script>
 <script src="assist.js"></script>
 <script src="lander.js"></script>
+<script src="launcher.js"></script>
 <script>
 // Orbit Mission: launch from Terra, reach orbit, transfer to Luna, get
 // captured, settle into lunar orbit and land. Each step is a checkpoint.
@@ -156,11 +157,12 @@ function placeOnGround() {
 }
 
 // ---------- state ----------
-let state = "title", S, warpIdx = 0, mapView = false, zoomMul = 1, assist = true, hold = null;
+// assist / autoLand are saved settings shared with landing practice (launcher.js)
+let state = "title", S, warpIdx = 0, mapView = false, zoomMul = 1, assist = Launcher.settings.assist, hold = null;
 // view: 0 rocket (flight), 1 orbit map around the body you're near, 2 whole Terra–Luna system
 const VIEWS = ["Rocket", "Orbit map", "Terra–Luna system"];
 let aiming = false;   // assist on and the stick is pointing somewhere
-let autoLand = false, autoActive = false, autoInfo = null;   // L3: autopilot flies the descent
+let autoLand = Launcher.settings.autoLand, autoActive = false, autoInfo = null;   // L3: autopilot flies the descent
 let view = 0, viewNote = 0, warpNote = null;
 
 // Unlimited fuel: a practice switch shared with landing mode. Tanks never drain;
@@ -174,12 +176,18 @@ function toggleFuel() {
   if (infFuel && S) for (let i = S.stage; i < STAGES.length; i++) S.fuel[i] = STAGES[i].fuel;
   Pad.setup({});   // refresh the menu label
 }
+function saveSettings() { Launcher.saveSettings({ assist, autoLand }); Pad.setup({}); }
 function toggleAutoLand() {
   autoLand = !autoLand;
   if (autoLand) { assist = true; hold = null; }
   Assist.pid.reset();
   Lander.voice.event(autoLand ? "autoOn" : "autoOff");
-  Pad.setup({});
+  saveSettings();
+}
+function toggleAssist() {
+  assist = !assist; Assist.pid.reset(); hold = null; if (!assist) autoLand = false;
+  if (S) S.target = S.th;
+  saveSettings();
 }
 let pred = { pts: [], lunaPts: [], enc: null, at: 0 }, banner = null, parts = [], debris = [];
 
@@ -438,7 +446,6 @@ const ALL_KEY = "orbit-mission-checkpoints";   // one per assignment reached, th
 const READY = PHASES.length;                   // slot of the "Ready to land" checkpoint
 let checkpoint = null, checkpoints = [], titleCp = 0;
 const cpName = i => i === READY ? "6+. Ready to land (radar range)" : `${i + 1}. ${PHASES[i].name}`;
-const cpTag = i => i === READY ? "6+" : String(i + 1);
 function saveCheckpoint(slot = S.phase < PHASES.length ? S.phase : null) {
   checkpoint = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
   if (slot !== null) checkpoints[slot] = checkpoint;
@@ -459,6 +466,10 @@ function loadCheckpoint(cp = checkpoint) {
   Lander.voice.reset(S.landedOn ? 0 : clearance().alt);
   return true;
 }
+// Assignments ever completed (ticks on the checkpoint list) and the best score
+const DONE_KEY = "orbit-mission-done";
+let done = [], best = 0;
+function saveDone() { try { localStorage.setItem(DONE_KEY, JSON.stringify({ done, best })); } catch (e) {} }
 function startFrom(i) {
   if (i === 0 || !checkpoints[i]) newMission(); else loadCheckpoint(checkpoints[i]);
   state = "play";
@@ -467,7 +478,7 @@ const SLOTS = [...PHASES.keys(), READY];
 function reached() { return SLOTS.filter(i => checkpoints[i]); }
 function chooseCheckpoint() {
   Pad.submenu("Choose checkpoint", SLOTS.map(i => checkpoints[i]
-    ? { label: cpName(i) + (i === 0 ? " (launch pad)" : ""), action: () => startFrom(i) }
+    ? { label: (done[i === READY ? PHASES.length - 1 : i] ? "✓ " : "") + cpName(i) + (i === 0 ? " (launch pad)" : ""), action: () => startFrom(i) }
     : { label: `🔒 ${cpName(i)}: not reached yet`, keepOpen: true, action: () => {} }));
 }
 function loadSaved() {
@@ -475,6 +486,10 @@ function loadSaved() {
   try { checkpoint = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
   // Saves from before the checkpoint list: keep the one there was
   if (checkpoint && checkpoint.phase < PHASES.length && !checkpoints[checkpoint.phase]) checkpoints[checkpoint.phase] = checkpoint;
+  try { const d = JSON.parse(localStorage.getItem(DONE_KEY) || "null"); if (d) { done = d.done || []; best = d.best || 0; } } catch (e) {}
+  // Reaching an assignment means the one before it was completed; phase 6 = all of them
+  for (let i = 1; i < PHASES.length; i++) if (checkpoints[i]) for (let j = 0; j < i; j++) done[j] = true;
+  if (checkpoint && checkpoint.phase >= PHASES.length) { PHASES.forEach((_, j) => { done[j] = true; }); best = Math.max(best, checkpoint.score || 0); }
   if (!checkpoints[0]) checkpoints[0] = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
   const r = reached();
   titleCp = checkpoint && checkpoint.readyCp && checkpoints[READY] ? READY
@@ -532,7 +547,7 @@ function warpLimitReason() {
 
 let lastDom = TERRA;
 function update(dt, p) {
-  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); S.target = S.th; hold = null; if (!assist) autoLand = false; }
+  if (p.pressed[B.X]) toggleAssist();
   if (p.pressed[B.L3]) toggleAutoLand();
   if (p.pressed[B.Y]) stage();
   if (p.pressed[B.A]) { view = (view + 1) % VIEWS.length; mapView = view > 0; zoomMul = 1; viewNote = performance.now() + 2000; }
@@ -589,7 +604,10 @@ function update(dt, p) {
     const ph = PHASES[S.phase];
     const fuelBonus = infFuel ? 0 : Math.round(deltaV(S) / 10);
     let pts = 100 + (S.phase === PHASES.length - 1 ? fuelBonus + Math.max(0, Math.round((3 - S.touch.down) * 50)) : 0);
+    done[S.phase] = true;
     S.score += pts; S.phase++;
+    if (S.phase >= PHASES.length) best = Math.max(best, S.score);
+    saveDone();
     Pad.rumble(0.3, 0.5, 250);
     if (S.phase >= PHASES.length) { state = "complete"; saveCheckpoint(); }
     else {
@@ -604,7 +622,7 @@ function update(dt, p) {
     if (sit.radar < from) {
       const r = sit.el.r, g = LUNA.mu / (r * r), amax = S.fuel[S.stage] > 0 ? STAGES[S.stage].thrust / mass(S) : 0;
       const vUp = vUpRel(LUNA), stop = vUp < 0 ? vUp * vUp / (2 * Math.max(1e-6, amax - g)) : 0;
-      if (amax > g * 1.2 && stop < sit.radar * 0.8) {
+      if (amax > g * 1.05 && stop < sit.radar) {
         S.readyCp = true; saveCheckpoint(READY);
         Lander.voice.event("ready");
         banner = { text: "✓ Ready to land", sub: `Checkpoint saved at ${Lander.fmtAlt(sit.radar)} radar altitude · L3 auto-land`, until: performance.now() + 3500 };
@@ -1014,15 +1032,11 @@ function render(p) {
   if (state === "play" || state === "pause") drawVelocityVector(sit);
 
   if (state === "title") {
-    panel([
-      ["ORBIT MISSION", 44, "#4cc2ff", 900],
-      ["Fly from Terra to Luna with real orbital mechanics.", 17],
-      ["Launch → orbit → transfer → capture → lunar orbit → landing. Each step is a checkpoint.", 15],
-      ["Time warp (LB/RB) only speeds up game time: the physics stays exact.", 14, "#8a92a3"],
-      [titleCp > 0 ? `A: start at ${cpName(titleCp)} · X: new mission` : "Press A to start", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
-      [reached().length > 1 ? "D-pad ◀ ▶ choose checkpoint: " + reached().map(i => i === titleCp ? `[${cpTag(i)}]` : cpTag(i)).join(" ") : "Each assignment you reach becomes a checkpoint you can start from", 14, "#c9d1e0"],
-      [`Y: landing practice · B: hub · Unlimited fuel ${infFuel ? "ON" : "OFF"} (B while flying)`, 13, "#5c6475"],
-    ]);
+    Launcher.draw(ctx, W, H, screen);
+    if (!p.connected) {
+      ctx.textAlign = "center"; ctx.fillStyle = "#ffb547"; ctx.font = "700 15px system-ui, sans-serif";
+      ctx.fillText("Connect a controller and press any button (or use the keyboard / mouse)", W / 2, H - 24);
+    }
     return;
   }
   drawHUD(sit);
@@ -1031,7 +1045,7 @@ function render(p) {
       ["Mission lost", 36, "#ff6b5c", 900],
       [S.crashed, 15],
       [`Checkpoint: ${checkpoint && checkpoint.readyCp ? "Ready to land (radar range)" : PHASES[Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1)].name}`, 15, "#8a92a3"],
-      ["A: retry from this checkpoint · Start: menu → choose any checkpoint", 17, "#3ddc84", 700],
+      ["A: retry from this checkpoint · B: choose a checkpoint", 17, "#3ddc84", 700],
     ]);
   } else if (state === "complete") {
     panel([
@@ -1039,12 +1053,46 @@ function render(p) {
       [`Landed on Luna at ${S.touch.down.toFixed(2)} m/s after ${fmtTime(S.t)}`, 16],
       [infFuel ? "Unlimited fuel (no fuel bonus)" : `Δv left ${Math.round(deltaV(S))} m/s`, 15, "#8a92a3"],
       [`Score ${S.score}`, 26, "#ffb547", 800],
-      ["A: fly again · B: hub", 18, "#3ddc84", 700],
+      ["A or B: choose a checkpoint · fly again", 18, "#3ddc84", 700],
     ]);
   } else if (state === "pause") {
     // the Pad menu is drawn on top
   }
 }
+
+// ---------- start screens (launcher.js) ----------
+// Arriving here from the mode choice: pick a checkpoint, or settings
+let screen = null;
+function checkpointScreen() {
+  const items = SLOTS.map(i => {
+    const ph = i === READY ? PHASES.length - 1 : i, have = !!checkpoints[i];
+    const goal = i === READY ? "Saved when the radar first sees Luna's surface on the way down" : PHASES[i].goal.split(". ")[0] + ".";
+    return have
+      ? { slot: i, label: cpName(i) + (i === 0 ? " (launch pad)" : ""), status: done[ph] ? "done" : "open", value: i === titleCp ? "last played" : done[ph] ? "completed" : "", note: goal, action: () => startFrom(i) }
+      : { slot: i, label: cpName(i), status: "locked", note: "Not reached yet" };
+  });
+  if (done[PHASES.length - 1]) items.push({ label: `Mission complete · best score ${best}`, status: "info" });
+  items.push({ label: "Settings", note: "Assists, auto-land, unlimited fuel, sound", action: () => { screen = settingsScreen(); } });
+  items.push({ label: "← Back: choose mode", note: "Landing practice or the orbit mission", action: () => { location.href = "./"; } });
+  return { title: "ORBIT MISSION", sel: Math.max(0, items.findIndex(it => it.slot === titleCp)),
+    lines: ["Terra → Luna with real orbital mechanics. Start from any checkpoint you've reached.",
+            "Time warp (LB/RB) only speeds up game time · L3 auto-land · Start menu in flight"], items };
+}
+function settingsScreen() {
+  return Launcher.settingsScreen({
+    toggleAssist, toggleAutoLand, toggleFuel, togglePath: () => {},
+    tune: () => { assist = true; saveSettings(); Assist.open(); },
+    back: () => { screen = checkpointScreen(); },
+    getAssist: () => assist, getAutoLand: () => autoLand, getFuel: () => infFuel, getPath: () => Launcher.settings.showPath,
+  });
+}
+function screenBack() {
+  if (!screen) return;
+  if (screen.title === "ORBIT MISSION") location.href = "./";
+  else screen = checkpointScreen();
+}
+function showCheckpoints() { state = "title"; screen = checkpointScreen(); }
+Launcher.attach(() => state === "title" && !Assist.isOpen() ? screen : null, screenBack);
 
 // ---------- main loop ----------
 Pad.setup({
@@ -1058,8 +1106,9 @@ Pad.setup({
     { label: "Restart mission", action: () => { newMission(); state = "play"; } },
     { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
     { get label() { return `Sound (voice callouts): ${Lander.voice.on ? "ON" : "OFF"}`; }, keepOpen: true, action: () => { Lander.voice.toggle(); Pad.setup({}); } },
-    { label: "Tune attitude assist (PID)", action: () => { assist = true; Assist.open(); } },
-    { label: "Landing practice", action: () => { location.href = "./"; } },
+    { label: "Tune attitude assist (PID)", action: () => { assist = true; saveSettings(); Assist.open(); } },
+    { label: "Main menu (mode, checkpoints, settings)", action: showCheckpoints },
+    { label: "Landing practice", action: () => { location.href = "./#practice"; } },
   ],
   canOpen: () => !Assist.isOpen(),
   onMenu: open => {
@@ -1070,6 +1119,7 @@ Pad.setup({
 
 newMission(false);
 loadSaved();
+screen = checkpointScreen();
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
@@ -1077,17 +1127,12 @@ function frame(now) {
   if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
   if (p.connected && state !== "pause") {
     if (state === "title") {
-      const r = reached();
-      if (p.pressed[B.LEFT] || p.pressed[B.RIGHT]) titleCp = r[(r.indexOf(titleCp) + (p.pressed[B.RIGHT] ? 1 : r.length - 1)) % r.length];
-      else if (p.pressed[B.A]) startFrom(titleCp);
-      else if (p.pressed[B.X]) startFrom(0);
-      else if (p.pressed[B.Y]) location.href = "./";
-      else if (p.pressed[B.B]) location.href = "../../";
+      if (!Assist.isOpen()) Launcher.handle(p, screen, screenBack);
     } else if (state === "crashed") {
       if (p.pressed[B.A]) { loadCheckpoint(); state = "play"; }
+      else if (p.pressed[B.B]) showCheckpoints();
     } else if (state === "complete") {
-      if (p.pressed[B.A]) { newMission(); state = "play"; }
-      else if (p.pressed[B.B]) location.href = "../../";
+      if (p.pressed[B.A] || p.pressed[B.B]) showCheckpoints();
     } else if (state === "play") update(dt, p);
   }
   if (state === "crashed") for (const q of parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; }
