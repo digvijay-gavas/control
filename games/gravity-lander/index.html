@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gravity Lander</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hub { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); color: #6b7385; font: 600 12px system-ui, sans-serif; text-decoration: none; }
+  #hub:hover { color: #4cc2ff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<a id="hub" href="../../">← Hub</a>
+<script src="../../shared/pad.js"></script>
+<script>
+// Gravity Lander: land on real worlds with real physics.
+//   RT          main engine throttle (analog)
+//   Left stick  rotate (RCS thrusters give angular acceleration; spin keeps going)
+//   LT          auto-level assist (analog: squeeze harder, stronger correction)
+//   Y           show / hide predicted path
+//   A           start, next world, retry
+//   Start/Back  menu · B on title or result screen returns to the hub
+//
+// Physics, in SI units:
+//   - gravity, thrust and drag are forces; a = F / m (Newton's second law)
+//   - thrust pushes along the craft's axis, so tilting turns lift into sideways push
+//   - fuel burn follows the engine's specific impulse: mdot = F / (Isp * g0),
+//     so the craft gets lighter and accelerates harder as it burns (rocket equation)
+//   - drag = 1/2 * rho * Cd * A * v^2 against motion relative to the wind
+//   - rotation has inertia: thrusters change angular velocity, not the angle
+
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0, S = 1, WW = 1, WH = 1;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  S = H / 70;                // pixels per metre at full view: the world is 70 m tall
+  WW = W / S; WH = H / S;
+}
+window.addEventListener("resize", () => { resize(); if (terrain) newLevel(levelIdx, round); });
+resize();
+
+const B = Pad.BTN;
+const G0 = 9.80665, ISP = 311, DRY = 2000, CD = 1.2, AREA = 12;
+const FEET = [[-2.1, 0], [2.1, 0]];
+const BODY = [[-1.6, 1.0], [1.6, 1.0], [-1.3, 3.3], [1.3, 3.3], [0, 4.1]];
+const SAFE_VY = 2.5, SAFE_VX = 1.5, SAFE_TILT = 11 * Math.PI / 180, SAFE_SPIN = 0.6;
+
+const WORLDS = [
+  { name: "Moon",  g: 1.62, rho: 0,     wind: 0,  pads: 3, padMin: 10, sky: ["#020308", "#10131d"], ground: "#9a9ca3", dark: "#5d6067", note: "No air at all: nothing slows you down but your engine." },
+  { name: "Mars",  g: 3.71, rho: 0.020, wind: 18, pads: 3, padMin: 9,  sky: ["#2d140c", "#c47a4c"], ground: "#b4582f", dark: "#76361b", note: "Air 1% as thick as Earth's: strong wind, little push." },
+  { name: "Titan", g: 1.35, rho: 5.3,   wind: 3,  pads: 2, padMin: 9,  sky: ["#4a320c", "#cf9a3a"], ground: "#6f5733", dark: "#47371f", note: "Air 4x thicker than Earth's: drag slows every fall." },
+  { name: "Earth", g: 9.81, rho: 1.225, wind: 9,  pads: 2, padMin: 8,  sky: ["#2f6fc4", "#b5defc"], ground: "#4f8a3a", dark: "#33602a", note: "Six times the Moon's gravity: start braking early." },
+];
+
+let state = "title", levelIdx = 0, round = 0, total = 0, showPath = true;
+let world, terrain, pads, stars, L, maxThrust, windBase, t, parts, result, cam;
+
+// ---------- level setup ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function newLevel(idx, r) {
+  levelIdx = idx; round = r; world = WORLDS[idx];
+  // Pads
+  pads = [];
+  const n = world.pads, span = (WW * 0.82) / n;
+  for (let i = 0; i < n; i++) {
+    const w = Math.max(5.5, rand(world.padMin, world.padMin + 7) - r * 1.5);
+    const cx = WW * 0.16 + span * i + rand(w / 2 + 2, span - w / 2 - 2);
+    pads.push({ x0: cx - w / 2, x1: cx + w / 2, y: 0, mult: clamp(Math.round(20 / w), 1, 5) });
+  }
+  // Terrain: random walk, with the pads cut in flat
+  terrain = [];
+  let x = 0, y = rand(10, 24), pi = 0;
+  terrain.push({ x, y });
+  while (x < WW) {
+    const pad = pads[pi];
+    if (pad && x >= pad.x0 - 0.01) {
+      y = clamp(y + rand(-3, 3), 4, 26); pad.y = y;
+      terrain.push({ x: pad.x0, y }, { x: pad.x1, y });
+      x = pad.x1; pi++; continue;
+    }
+    const step = rand(2.5, 5.5);
+    x = pad ? Math.min(x + step, pad.x0) : Math.min(x + step, WW + 1);
+    y = clamp(y + rand(-6, 6), 3, 34);
+    terrain.push({ x, y });
+  }
+  stars = Array.from({ length: 140 }, () => ({ x: Math.random() * WW, y: rand(20, WH), r: Math.random() * 1.3 + 0.3 }));
+
+  // Craft: fuel from the rocket equation for a delta-v budget of ~2x the ideal
+  // braking burn plus about 18 s of hovering (hovering costs g m/s every second)
+  const h = 56, dvNeeded = Math.sqrt(2 * world.g * (h - 15)) * 2.2 + world.g * 18 + 20;
+  const fuel = DRY * (Math.exp(dvNeeded / (ISP * G0)) - 1);
+  maxThrust = 2.3 * (DRY + fuel) * world.g;          // thrust-to-weight 2.3 when full
+  L = { x: WW * 0.08, y: h, vx: rand(3, 6), vy: rand(-1.5, 0), th: rand(-0.15, 0.15), om: 0, fuel, fuel0: fuel, thr: 0, rcs: 0 };
+  windBase = world.wind * rand(0.4, 1) * (Math.random() < 0.5 ? -1 : 1);
+  t = 0; parts = []; result = null;
+  cam = { x: WW / 2, y: WH / 2, z: 1 };
+}
+
+function groundAt(x) {
+  for (let i = 0; i < terrain.length - 1; i++) {
+    const a = terrain[i], b = terrain[i + 1];
+    if (x >= a.x && x <= b.x && b.x > a.x) return a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x);
+  }
+  return x < 0 ? terrain[0].y : terrain[terrain.length - 1].y;
+}
+function windAt(time) {
+  if (!world.wind) return 0;
+  return windBase + world.wind * 0.35 * Math.sin(time * 0.7) + world.wind * 0.15 * Math.sin(time * 2.3 + 1);
+}
+function toWorld(px, py, s = L) {
+  const c = Math.cos(s.th), sn = Math.sin(s.th);
+  return [s.x + px * c - py * sn, s.y + px * sn + py * c];
+}
+
+// ---------- physics ----------
+function accel(s, thr, time) {
+  const m = DRY + s.fuel;
+  const F = s.fuel > 0 ? maxThrust * thr : 0;
+  let ax = -Math.sin(s.th) * F / m, ay = Math.cos(s.th) * F / m - world.g;
+  if (world.rho > 0) {
+    const rvx = s.vx - windAt(time), rvy = s.vy, sp = Math.hypot(rvx, rvy);
+    const k = 0.5 * world.rho * CD * AREA * sp / m;
+    ax -= k * rvx; ay -= k * rvy;
+  }
+  return [ax, ay, F, m];
+}
+
+function step(dt, p) {
+  const thr = p.rt;
+  const [ax, ay, F, m] = accel(L, thr, t);
+  L.vx += ax * dt; L.vy += ay * dt;
+  L.x += L.vx * dt; L.y += L.vy * dt;
+  L.fuel = Math.max(0, L.fuel - F / (ISP * G0) * dt);
+  L.thr = L.fuel > 0 ? thr : 0;
+
+  // Rotation: torque -> angular acceleration, scaled by mass (lighter turns quicker)
+  const inertia = m / (DRY + L.fuel0);
+  let alpha = p.lx * 1.8;
+  if (p.lt > 0.05) alpha += clamp((-L.th * 3.2 - L.om * 3.0), -2.4, 2.4) * p.lt;
+  alpha = L.fuel > 0 ? alpha / inertia : 0;
+  L.om += alpha * dt; L.th += L.om * dt;
+  L.th = Math.atan2(Math.sin(L.th), Math.cos(L.th));
+  L.rcs = alpha;
+  L.fuel = Math.max(0, L.fuel - Math.abs(alpha) * 0.08 * dt);
+  t += dt;
+
+  if (L.x < -6 || L.x > WW + 6) return crash("You flew off the map.");
+  for (const bp of BODY) {
+    const [x, y] = toWorld(bp[0], bp[1]);
+    if (y <= groundAt(x)) return crash(bodyCrashReason());
+  }
+  const feet = FEET.map(f => toWorld(f[0], f[1]));
+  if (feet.some(([x, y]) => y <= groundAt(x))) touchdown(feet);
+}
+
+function bodyCrashReason() {
+  if (Math.abs(L.th) > 0.6) return `The craft hit the ground tilted ${Math.round(Math.abs(L.th) * 180 / Math.PI)}°.`;
+  return `The body hit the ground at ${Math.hypot(L.vx, L.vy).toFixed(1)} m/s.`;
+}
+
+function touchdown(feet) {
+  const fall = -L.vy, side = Math.abs(L.vx), tilt = Math.abs(L.th), spin = Math.abs(L.om);
+  const reasons = [];
+  if (fall > SAFE_VY) reasons.push(`falling ${fall.toFixed(1)} m/s (max ${SAFE_VY})`);
+  if (side > SAFE_VX) reasons.push(`sliding ${side.toFixed(1)} m/s sideways (max ${SAFE_VX})`);
+  if (tilt > SAFE_TILT) reasons.push(`tilted ${Math.round(tilt * 180 / Math.PI)}° (max 11°)`);
+  if (spin > SAFE_SPIN) reasons.push("still spinning");
+  const gl = groundAt(feet[0][0]), gr = groundAt(feet[1][0]);
+  if (!reasons.length && Math.abs(gl - gr) > 0.7) reasons.push("the ground is too steep");
+  if (reasons.length) return crash("Hard landing: " + reasons.join(", ") + ".");
+
+  const xs = feet.map(f => f[0]);
+  const pad = pads.find(pd => Math.min(...xs) >= pd.x0 && Math.max(...xs) <= pd.x1);
+  const mult = pad ? pad.mult : 0;
+  const fuelPct = L.fuel / L.fuel0;
+  const softness = 1 - fall / SAFE_VY;
+  const points = Math.round((50 + fuelPct * 100 + softness * 50) * Math.max(mult, 0.5));
+  total += points;
+  L.vx = L.vy = L.om = 0; L.thr = 0;
+  result = { ok: true, points, pad, fall, fuelPct };
+  state = "result";
+  Pad.rumble(0.25, 0.35, 160);
+}
+
+function crash(msg) {
+  result = { ok: false, msg };
+  state = "result";
+  for (let i = 0; i < 90; i++) {
+    const a = Math.random() * Math.PI * 2, s = rand(2, 18);
+    parts.push({ x: L.x, y: L.y + 2, vx: Math.cos(a) * s + L.vx * 0.3, vy: Math.sin(a) * s + 4, life: rand(0.8, 2), max: 2, c: Math.random() < 0.5 ? "#ffb547" : "#ff5c3a" });
+  }
+  Pad.rumble(1, 1, 500);
+}
+
+function predictPath() {
+  const s = { ...L }, pts = [], dt = 1 / 30;
+  for (let i = 0; i < 150; i++) {
+    const [ax, ay, F] = accel(s, L.thr, t + i * dt);
+    s.vx += ax * dt; s.vy += ay * dt; s.x += s.vx * dt; s.y += s.vy * dt;
+    s.fuel = Math.max(0, s.fuel - F / (ISP * G0) * dt);
+    if (i % 3 === 0) pts.push([s.x, s.y]);
+    if (s.y <= groundAt(s.x)) { pts.push([s.x, s.y]); break; }
+  }
+  return pts;
+}
+
+// ---------- update ----------
+function update(dt, p) {
+  if (p.pressed[B.Y]) showPath = !showPath;
+  if (state === "play") {
+    const sub = 4;
+    for (let i = 0; i < sub && state === "play"; i++) step(dt / sub, p);
+    if (state === "play" && L.thr > 0.05) Pad.rumble(L.thr * 0.25, L.thr * 0.35, 160);
+  }
+  for (const q of parts) { q.vy -= world.g * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; if (q.y < groundAt(q.x)) { q.y = groundAt(q.x); q.vy *= -0.3; q.vx *= 0.6; } }
+  parts = parts.filter(q => q.life > 0);
+  if (state === "play" && L.thr > 0.05) {
+    for (let i = 0; i < 3; i++) {
+      const [ex, ey] = toWorld(rand(-0.4, 0.4), 0.6);
+      const sp = rand(8, 16) * L.thr;
+      parts.push({ x: ex, y: ey, vx: Math.sin(L.th) * sp + L.vx, vy: -Math.cos(L.th) * sp + L.vy, life: rand(0.2, 0.5), max: 0.5, c: "#ffd27a", smoke: true });
+    }
+  }
+
+  // Camera zooms in near the ground
+  const alt = L.y - groundAt(L.x);
+  const z = state === "title" ? 1 : alt < 18 ? 2.4 : alt < 30 ? 1.6 : 1;
+  cam.z += (z - cam.z) * Math.min(1, dt * 2.5);
+  const k = S * cam.z, hw = W / (2 * k), hh = H / (2 * k);
+  const tx = cam.z > 1.05 ? L.x : WW / 2, ty = cam.z > 1.05 ? L.y : WH / 2;
+  cam.x += (clamp(tx, hw, WW - hw) - cam.x) * Math.min(1, dt * 4);
+  cam.y += (clamp(ty, hh, WH - hh) - cam.y) * Math.min(1, dt * 4);
+}
+
+// ---------- render ----------
+function sx(x) { return (x - cam.x) * S * cam.z + W / 2; }
+function sy(y) { return H / 2 - (y - cam.y) * S * cam.z; }
+function sl(m) { return m * S * cam.z; }
+
+function drawWorld() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, world.sky[0]); g.addColorStop(1, world.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (world.rho < 0.1) {
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    for (const s of stars) { ctx.globalAlpha = world.name === "Moon" ? 0.9 : 0.25; ctx.fillRect(sx(s.x), sy(s.y), s.r, s.r); }
+    ctx.globalAlpha = 1;
+  }
+
+  // terrain
+  ctx.beginPath(); ctx.moveTo(sx(terrain[0].x), H + 10);
+  for (const p of terrain) ctx.lineTo(sx(p.x), sy(p.y));
+  ctx.lineTo(sx(terrain[terrain.length - 1].x), H + 10); ctx.closePath();
+  const tg = ctx.createLinearGradient(0, sy(30), 0, H);
+  tg.addColorStop(0, world.ground); tg.addColorStop(1, world.dark);
+  ctx.fillStyle = tg; ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // pads
+  for (const pd of pads) {
+    ctx.fillStyle = "#e6e8ee";
+    ctx.fillRect(sx(pd.x0), sy(pd.y) - 3, sl(pd.x1 - pd.x0), 4);
+    const blink = Math.sin(performance.now() / 250) > 0;
+    ctx.fillStyle = blink ? "#3ddc84" : "#1e6b41";
+    ctx.beginPath(); ctx.arc(sx(pd.x0), sy(pd.y) - 5, 3, 0, Math.PI * 2); ctx.arc(sx(pd.x1), sy(pd.y) - 5, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "700 13px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`×${pd.mult}`, sx((pd.x0 + pd.x1) / 2), sy(pd.y) + 18);
+  }
+
+  // predicted path
+  if (showPath && state === "play") {
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    for (const [x, y] of predictPath()) { ctx.beginPath(); ctx.arc(sx(x), sy(y), 1.8, 0, Math.PI * 2); ctx.fill(); }
+  }
+
+  // particles
+  for (const q of parts) {
+    ctx.globalAlpha = Math.max(0, q.life / q.max);
+    ctx.fillStyle = q.c;
+    const r = q.smoke ? 2.5 : 3;
+    ctx.fillRect(sx(q.x) - r / 2, sy(q.y) - r / 2, r, r);
+  }
+  ctx.globalAlpha = 1;
+
+  if (!(result && !result.ok)) drawLander();
+}
+
+function drawLander() {
+  ctx.save();
+  ctx.translate(sx(L.x), sy(L.y));
+  ctx.rotate(-L.th);
+  const k = sl(1);
+  ctx.scale(k, -k);  // draw in metres, y up
+  // flame
+  if (L.thr > 0.02) {
+    const len = 1.2 + L.thr * 4 * (0.85 + Math.random() * 0.3);
+    const fg = ctx.createLinearGradient(0, 0.6, 0, 0.6 - len);
+    fg.addColorStop(0, "rgba(255,240,200,0.95)"); fg.addColorStop(0.4, "rgba(255,170,60,0.8)"); fg.addColorStop(1, "rgba(255,80,30,0)");
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.moveTo(-0.55, 0.6); ctx.lineTo(0, 0.6 - len); ctx.lineTo(0.55, 0.6); ctx.closePath(); ctx.fill();
+  }
+  // RCS puffs
+  if (Math.abs(L.rcs) > 0.2) {
+    const sgn = Math.sign(L.rcs);
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.beginPath(); ctx.arc(1.7 * sgn, 3.0, 0.25 + Math.random() * 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-1.7 * sgn, 1.6, 0.25 + Math.random() * 0.2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.lineWidth = 0.18; ctx.lineJoin = "round";
+  // legs
+  ctx.strokeStyle = "#c9ccd3";
+  ctx.beginPath();
+  ctx.moveTo(-1.2, 1.2); ctx.lineTo(-2.1, 0); ctx.moveTo(1.2, 1.2); ctx.lineTo(2.1, 0);
+  ctx.moveTo(-0.9, 0.9); ctx.lineTo(-1.8, 0.35); ctx.moveTo(0.9, 0.9); ctx.lineTo(1.8, 0.35);
+  ctx.stroke();
+  ctx.fillStyle = "#c9ccd3";
+  ctx.fillRect(-2.5, -0.08, 0.8, 0.16); ctx.fillRect(1.7, -0.08, 0.8, 0.16);
+  // descent stage (gold foil)
+  ctx.fillStyle = "#d9a441"; ctx.strokeStyle = "#8a6420";
+  ctx.beginPath(); ctx.moveTo(-1.5, 0.9); ctx.lineTo(1.5, 0.9); ctx.lineTo(1.3, 2.0); ctx.lineTo(-1.3, 2.0); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // engine bell
+  ctx.fillStyle = "#555a63";
+  ctx.beginPath(); ctx.moveTo(-0.35, 0.9); ctx.lineTo(0.35, 0.9); ctx.lineTo(0.55, 0.55); ctx.lineTo(-0.55, 0.55); ctx.closePath(); ctx.fill();
+  // ascent stage
+  ctx.fillStyle = "#e9ebef"; ctx.strokeStyle = "#8a8f99";
+  ctx.beginPath(); ctx.moveTo(-1.2, 2.0); ctx.lineTo(1.2, 2.0); ctx.lineTo(1.0, 3.4); ctx.lineTo(0.3, 3.9); ctx.lineTo(-0.3, 3.9); ctx.lineTo(-1.0, 3.4); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // window
+  ctx.fillStyle = "#2b5c8a";
+  ctx.beginPath(); ctx.moveTo(-0.6, 2.9); ctx.lineTo(-0.1, 2.9); ctx.lineTo(-0.1, 3.4); ctx.lineTo(-0.45, 3.4); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function gauge(x, y, label, value, ok, unit) {
+  ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui, sans-serif"; ctx.textAlign = "left";
+  ctx.fillText(label, x, y);
+  ctx.fillStyle = ok === undefined ? "#e6e8ee" : ok ? "#3ddc84" : "#ff6b5c";
+  ctx.font = "700 18px ui-monospace, Consolas, monospace";
+  ctx.fillText(value + (unit ? " " + unit : ""), x, y + 21);
+}
+
+function drawHUD(p) {
+  const m = DRY + L.fuel;
+  const alt = Math.max(0, L.y - groundAt(L.x));
+  // Panel sits top-right; the craft starts at the top-left
+  ctx.save(); ctx.translate(W - 278, 0);
+  ctx.fillStyle = "rgba(10,12,18,0.72)";
+  ctx.beginPath(); ctx.roundRect(14, 14, 250, 316, 12); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "800 20px system-ui, sans-serif"; ctx.textAlign = "left";
+  ctx.fillText(world.name + (round ? `  (round ${round + 1})` : ""), 28, 42);
+  ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui, sans-serif";
+  ctx.fillText(`g = ${world.g} m/s²   air ρ = ${world.rho} kg/m³`, 28, 60);
+
+  gauge(28, 86, "ALTITUDE", alt.toFixed(1), undefined, "m");
+  gauge(140, 86, "VERTICAL", (L.vy >= 0 ? "↑" : "↓") + Math.abs(L.vy).toFixed(1), -L.vy <= SAFE_VY, "m/s");
+  gauge(28, 136, "SIDEWAYS", (L.vx >= 0 ? "→" : "←") + Math.abs(L.vx).toFixed(1), Math.abs(L.vx) <= SAFE_VX, "m/s");
+  gauge(140, 136, "TILT", Math.round(L.th * -180 / Math.PI) + "°", Math.abs(L.th) <= SAFE_TILT);
+  const twr = L.fuel > 0 ? maxThrust / (m * world.g) : 0;
+  gauge(28, 186, "THRUST/WEIGHT", twr.toFixed(2), twr > 1);
+  gauge(140, 186, "MASS", Math.round(m), undefined, "kg");
+
+  ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui, sans-serif";
+  ctx.fillText(`FUEL ${L.fuel.toFixed(1)} kg`, 28, 236);
+  ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(28, 242, 222, 8);
+  const fp = L.fuel / L.fuel0;
+  ctx.fillStyle = fp < 0.2 ? "#ff6b5c" : "#ffb547"; ctx.fillRect(28, 242, 222 * fp, 8);
+  ctx.fillStyle = "#8a92a3"; ctx.fillText(`THROTTLE ${Math.round(L.thr * 100)}%`, 28, 270);
+  ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(28, 276, 222, 8);
+  ctx.fillStyle = "#4cc2ff"; ctx.fillRect(28, 276, 222 * L.thr, 8);
+  const wind = windAt(t);
+  ctx.fillStyle = "#8a92a3";
+  ctx.fillText(world.wind ? `WIND ${wind >= 0 ? "→" : "←"} ${Math.abs(wind).toFixed(1)} m/s` : "WIND none (no air)", 28, 306);
+  ctx.fillText(`SCORE ${total}`, 160, 306);
+  ctx.restore();
+
+  ctx.textAlign = "right"; ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "600 12px system-ui, sans-serif";
+  ctx.fillText("RT throttle · Left stick rotate · LT auto-level · Y path · Start menu", W - 16, H - 16);
+  ctx.fillText(`Safe landing: fall < ${SAFE_VY} m/s · sideways < ${SAFE_VX} m/s · tilt < 11°`, W - 16, H - 34);
+}
+
+function panel(lines) {
+  ctx.fillStyle = "rgba(4,6,10,0.6)"; ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(620, W - 32), bh = lines.reduce((a, l) => a + (l[1] + 16), 40), bx = (W - bw) / 2, by = (H - bh) / 2;
+  ctx.fillStyle = "#181b22"; ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 18); ctx.fill(); ctx.stroke();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  let y = by + 30;
+  for (const [text, size, color, weight] of lines) {
+    y += size / 2;
+    ctx.font = `${weight || 600} ${size}px system-ui, sans-serif`;
+    ctx.fillStyle = color || "#c9d1e0";
+    ctx.fillText(text, W / 2, y, bw - 40);
+    y += size / 2 + 16;
+  }
+  ctx.textBaseline = "alphabetic";
+}
+
+function render(p) {
+  drawWorld();
+  if (state === "title") {
+    panel([
+      ["GRAVITY LANDER", 44, "#4cc2ff", 900],
+      ["Land softly on four real worlds: Moon, Mars, Titan, Earth.", 16],
+      ["Real gravity, real air drag, and fuel mass that drops as you burn.", 16],
+      ["RT throttle · Left stick rotate · LT auto-level · Y predicted path", 15, "#8a92a3"],
+      [p.connected ? "Press A to launch" : "Connect a controller and press any button", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      ["B: back to hub · Start: menu", 13, "#5c6475"],
+    ]);
+    return;
+  }
+  drawHUD(p);
+  if (state === "result") {
+    if (result.ok) {
+      const next = WORLDS[(levelIdx + 1) % WORLDS.length].name;
+      panel([
+        [result.pad ? "The Eagle has landed!" : "Landed (off the pad)", 34, "#3ddc84", 900],
+        [`Touchdown at ${result.fall.toFixed(2)} m/s · ${Math.round(result.fuelPct * 100)}% fuel left`, 17],
+        [result.pad ? `Pad bonus ×${result.pad.mult}` : "Land on a pad for a bonus multiplier", 16, "#ffb547"],
+        [`+${result.points} points · total ${total}`, 22, "#fff", 800],
+        [`Press A to fly to ${next} · B: hub`, 16, "#3ddc84"],
+      ]);
+    } else {
+      panel([
+        ["Crashed", 38, "#ff6b5c", 900],
+        [result.msg, 16],
+        [world.note, 15, "#8a92a3"],
+        ["Press A to try again · B: hub", 18, "#3ddc84", 700],
+      ]);
+    }
+  }
+}
+
+// ---------- main loop ----------
+Pad.setup({
+  title: "Gravity Lander",
+  hubUrl: "../../",
+  items: [
+    { label: "Resume", action: () => {} },
+    { label: "Restart this world", action: () => { newLevel(levelIdx, round); state = "play"; } },
+    { label: "Start over from the Moon", action: () => { total = 0; newLevel(0, 0); state = "play"; } },
+  ],
+  onMenu: open => {
+    if (open && state === "play") state = "pause";
+    else if (!open && state === "pause") state = "play";
+  },
+});
+
+newLevel(0, 0);
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000); last = now;
+  const p = Pad.poll();
+  if (p.connected && state !== "pause") {
+    if (state === "title" && p.pressed[B.A]) { total = 0; newLevel(0, 0); state = "play"; }
+    else if (state === "result" && p.pressed[B.A]) {
+      if (result.ok) { const n = levelIdx + 1; newLevel(n % WORLDS.length, round + (n >= WORLDS.length ? 1 : 0)); }
+      else newLevel(levelIdx, round);
+      state = "play";
+    }
+    else if ((state === "title" || state === "result") && p.pressed[B.B]) location.href = "../../";
+    else update(dt, p);
+  } else if (state === "title") update(dt, p);
+  render(p);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

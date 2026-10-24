@@ -66,4 +66,6 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 | Game | Highlights |
 |---|---|
 | [Trigger Storm](games/trigger-storm/) | Twin-stick shooter: RT pressure sets fire rate, LT pressure sets shield size, every button has a job. |
-| [Fruit Catch](games/fruit-catch/) | Easy and relaxed: move a basket to catch fruit, stars and hearts, and dodge bombs. Only the left stick or D-pad. |
+| [Fruit Catch](games/fruit-catch/) | Easy and relaxed: move a basket to catch fruit, stars and hearts, and dodge bombs. Left stick or D-pad, RT for a speed boost. |
+| [Gravity Lander](games/gravity-lander/) | Real physics: land on the Moon, Mars, Titan and Earth using each world's real gravity and air density. Thrust follows the craft's tilt, fuel mass burns off by the rocket equation, and spin has inertia. RT throttle, stick to rotate, LT auto-level. |
+| [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro. Best lap is saved. |

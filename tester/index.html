@@ -45,11 +45,15 @@
   button.ui { background: var(--idle); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
   button.ui:hover { border-color: var(--active); }
   .empty { color: var(--muted); padding: 40px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; }
+  .cell.noisy { box-shadow: inset 0 0 0 2px var(--accent); }
+  .jitter { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .jitter div { padding: 3px 0; }
+  .jitter b { color: var(--accent); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Gamepad Visualizer</h1>
+  <h1>Controller Tester</h1>
   <span id="status">Waiting for a controller. Press any button on it.</span>
   <a href="../" style="margin-left:auto;color:var(--active)">← Back to hub</a>
 </header>
@@ -110,6 +114,8 @@
       <div class="grid buttons"></div>
       <h3>Axes</h3>
       <div class="axes"></div>
+      <h3 style="margin-top:16px">Jitter at rest (last 2 s)</h3>
+      <div class="jitter">Collecting…</div>
     </div>
   </section>
 </template>
@@ -184,6 +190,10 @@ function createView(gp) {
       el: s, cx: +s.getAttribute("cx"), cy: +s.getAttribute("cy"),
       trail: node.querySelector(`[data-trail="${s.dataset.stick}"]`), pts: []
     })),
+    // Recent samples per input, for the jitter readout
+    hist: { b: gp.buttons.map(() => []), a: gp.axes.map(() => []), p: gp.buttons.map(() => []) },
+    jitterEl: node.querySelector(".jitter"), frame: 0,
+    labels: { b: gp.buttons.map((_, i) => std && STD_NAMES[i] ? STD_NAMES[i] : "B" + i), a: gp.axes.map((_, i) => std && AXIS_NAMES[i] ? AXIS_NAMES[i] : "Axis " + i) },
   };
 
   node.querySelector('[data-act="rumble"]').onclick = testVibration;
@@ -192,6 +202,36 @@ function createView(gp) {
 
   $pads.appendChild(node);
   return view;
+}
+
+// Lists inputs that wobble while nobody is touching them: small ranges near
+// rest (sensor noise) and "pressed" flipping on and off, which shows as flicker.
+const JITTER_SAMPLES = 120, JITTER_MIN = 0.002;
+function updateJitter(view, gp) {
+  const push = (arr, v) => { arr.push(v); if (arr.length > JITTER_SAMPLES) arr.shift(); };
+  gp.buttons.forEach((b, i) => { push(view.hist.b[i], b.value); push(view.hist.p[i], b.pressed); });
+  gp.axes.forEach((v, i) => push(view.hist.a[i], v));
+  if (++view.frame % 15) return;
+
+  const rows = [];
+  const check = (vals, label, restAbs, flips, cell, minRange = JITTER_MIN) => {
+    const min = Math.min(...vals), max = Math.max(...vals), range = max - min;
+    // Only count wobble near rest, not someone deliberately moving the input
+    const atRest = Math.max(Math.abs(min), Math.abs(max)) < restAbs;
+    const noisy = atRest && (range > minRange || flips > 1);
+    if (cell) cell.el.classList.toggle("noisy", noisy);
+    if (noisy) rows.push(`<div><b>${label}</b> ${min.toFixed(3)} to ${max.toFixed(3)}${flips > 1 ? ` · "pressed" flipped ${flips}×` : ""}</div>`);
+  };
+  view.hist.b.forEach((vals, i) => {
+    const p = view.hist.p[i];
+    let flips = 0; for (let k = 1; k < p.length; k++) if (p[k] !== p[k - 1]) flips++;
+    check(vals, view.labels.b[i], 0.35, flips, view.cells[i]);
+  });
+  // Sticks always wobble a little; only report it when it's noticeable
+  view.hist.a.forEach((vals, i) => check(vals, view.labels.a[i], 0.35, 0, null, 0.02));
+  view.jitterEl.innerHTML = rows.length
+    ? rows.join("") + `<div style="margin-top:6px">Small wobble at rest is sensor noise. Games ignore anything under 5% (triggers) or 18% (sticks).</div>`
+    : "None: every input is steady at rest.";
 }
 
 function update(view, gp) {
@@ -211,6 +251,8 @@ function update(view, gp) {
     a.bar.style.width = width + "%";
     a.val.textContent = v.toFixed(3);
   });
+
+  updateJitter(view, gp);
 
   if (gp.mapping !== "standard") return;
 

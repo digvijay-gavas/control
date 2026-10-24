@@ -20,4 +20,22 @@ window.GAMES = [
     description: "Relaxed and easy: move the basket to catch falling fruit, grab stars and hearts, dodge the bombs.",
     tags: ["Easy", "Left stick or D-pad", "Relaxed"],
   },
+  {
+    id: "gravity-lander",
+    title: "Gravity Lander",
+    path: "games/gravity-lander/",
+    icon: "🚀",
+    color: "#ffb547",
+    description: "Land softly on the Moon, Mars, Titan and Earth with real gravity, air drag and rocket physics.",
+    tags: ["Real physics", "RT throttle", "Skill"],
+  },
+  {
+    id: "turbo-laps",
+    title: "Turbo Laps",
+    path: "games/turbo-laps/",
+    icon: "🏎️",
+    color: "#ff4d4d",
+    description: "Top-down racing against three AI cars. Analog gas and brake, drift with A, nitro with X.",
+    tags: ["Racing", "Analog triggers", "3 laps"],
+  },
 ];
