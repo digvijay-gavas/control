@@ -165,6 +165,24 @@ function elements(s, body) {
 }
 
 // ---------- simulation ----------
+// Rotation is fast (it settles in about a second), so it always runs in small
+// fixed steps. Under time warp the orbit takes steps of a second or more, which
+// would make the PID overshoot further each step and set the craft spinning.
+const ROT_DT = 1 / 120;
+function rotate(dt, manualAlpha, maxAlpha) {
+  if (manualAlpha === 0) { S.th = wrap(S.th + S.om * dt); return; }   // free spin
+  const n = Math.ceil(dt / ROT_DT - 1e-9), h = dt / n;
+  for (let i = 0; i < n; i++) {
+    const err = wrap(S.target - S.th);
+    if (manualAlpha === null && Math.abs(err) < 1e-5 && Math.abs(S.om) < 1e-5) {
+      // Settled: stay on target for the rest of this step (no need to keep integrating)
+      S.th = S.target; S.om = 0; return;
+    }
+    const alpha = manualAlpha === null ? Assist.pid.update(err, S.om, h, maxAlpha) : manualAlpha;
+    S.om += alpha * h; S.th = wrap(S.th + S.om * h);
+  }
+}
+
 const tmp = {};
 function stepPhysics(dt, ctl) {
   const st = STAGES[S.stage];
@@ -175,13 +193,10 @@ function stepPhysics(dt, ctl) {
 
   // Attitude: PID holds a heading, or the stick drives the thrusters directly
   const maxAlpha = st.alpha * (STAGES[S.stage].dry + STAGES[S.stage].fuel + (S.stage === 0 ? STAGES[1].dry + STAGES[1].fuel : 0)) / m;
-  let alpha;
-  if (S.landedOn) alpha = 0;
-  else if (assist) {
-    if (hold) { const dir = holdDir(); if (dir !== null) S.target = dir; }
-    alpha = Assist.pid.update(wrap(S.target - S.th), S.om, dt, maxAlpha);
-  } else alpha = -ctl.turn * maxAlpha;
-  S.om += alpha * dt; S.th = wrap(S.th + S.om * dt);
+  if (!S.landedOn) {
+    if (assist && hold) { const dir = holdDir(); if (dir !== null) S.target = dir; }
+    rotate(dt, assist ? null : -ctl.turn * maxAlpha, maxAlpha);
+  }
 
   // Translation: gravity + thrust + drag (semi-implicit Euler with small steps)
   accel(S.x, S.y, S.vx, S.vy, S.t, tmp);
@@ -580,7 +595,13 @@ function drawStatus() {
     mode = hold ? `Holding ${holdName}` : aiming ? `Pointing where the stick points: ${screenDeg(S.target)}°` : `Holding heading ${screenDeg(S.target)}°`;
     detail = `Nose ${screenDeg(S.th)}° · off by ${err.toFixed(1)}° · Kp ${Assist.gains.kp.toFixed(1)} Ki ${Assist.gains.ki.toFixed(2)} Kd ${Assist.gains.kd.toFixed(1)}`;
   }
-  Assist.drawStatus(ctx, 14, H - 30, { on: assist, mode, detail, fuelInf: infFuel });
+  const holdShort = { pro: "PROGRADE", retro: "RETRO", out: "RADIAL OUT", in: "RADIAL IN" }[hold];
+  Assist.drawStatus(ctx, 14, H - 30, { mode, detail, rows: [
+    { name: "Attitude hold (PID)", value: assist ? "ON" : "OFF", on: assist, key: "X" },
+    { name: "Direction lock", value: hold ? holdShort : "OFF", on: !!hold, key: "D-pad" },
+    { name: "Unlimited fuel", value: infFuel ? "ON" : "OFF", on: infFuel, key: "B" },
+    { name: "Time warp", value: `${WARPS[warpIdx]}×`, on: WARPS[warpIdx] > 1, key: "LB / RB" },
+  ] });
 }
 
 function row(label, value, y, color) {

@@ -408,14 +408,20 @@ function drawHUD(p) {
     : "RT throttle · Left stick rotate · LT auto-level · X assist on · Y path · B fuel ∞ · Start menu", W - 16, H - 16);
   const deg = a => Math.round(-a * 180 / Math.PI);   // positive = leaning right
   const err = Math.abs(Math.atan2(Math.sin(L.target - L.th), Math.cos(L.target - L.th))) * 180 / Math.PI;
+  const rows = [
+    { name: "Attitude hold (PID)", value: assist ? "ON" : "OFF", on: assist, key: "X" },
+    { name: "Auto-level (manual mode only)", value: assist ? "N/A" : p.lt > 0.05 ? "ACTIVE" : "READY", on: !assist && p.lt > 0.05, key: "hold LT" },
+    { name: "Flight path preview", value: showPath ? "ON" : "OFF", on: showPath, key: "Y" },
+    { name: "Unlimited fuel", value: infFuel ? "ON" : "OFF", on: infFuel, key: "B" },
+  ];
   Assist.drawStatus(ctx, 14, H - 30, assist ? {
-    on: true, fuelInf: infFuel,
+    rows,
     mode: Math.abs(L.target) < 0.01 ? "Holding upright (0°) · stick ◀▶ sets the tilt" : `Holding tilt ${deg(L.target)}° ${L.target < 0 ? "right" : "left"} · centre stick = upright`,
     detail: `Tilt now ${deg(L.th)}° · off by ${err.toFixed(1)}° · Kp ${Assist.gains.kp.toFixed(1)} Ki ${Assist.gains.ki.toFixed(2)} Kd ${Assist.gains.kd.toFixed(1)}`,
   } : {
-    on: false, fuelInf: infFuel,
+    rows,
     mode: "Manual: stick ◀▶ fires the rotation thrusters",
-    detail: "Spin keeps going · LT auto-levels · X: assist on",
+    detail: "Spin keeps going until you counter it · X: assist on",
   });
   ctx.textAlign = "right"; ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "600 12px system-ui, sans-serif";
   ctx.fillText(`Safe landing: fall < ${SAFE_VY} m/s · sideways < ${SAFE_VX} m/s · tilt < 11°`, W - 16, H - 34);

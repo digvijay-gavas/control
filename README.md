@@ -75,9 +75,9 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 - **Gravity:** Newton's gravity from Terra and Luna at the same time, with Luna on a fixed circular orbit. Planets are scaled down, like Kerbal Space Program: Terra is 600 km in radius with 9.81 m/s² surface gravity, Luna is 200 km with 1.63 m/s², 12,000 km away.
 - **Rocket:** two stages (Y separates them). Mass falls as fuel burns, following the rocket equation. Δv left is shown live.
 - **Atmosphere:** drag in Terra's air, which thins out exponentially up to 70 km.
-- **Time warp:** RB faster, LB slower, from 1× to 10,000×. It only makes game time pass faster; the integrator takes smaller steps, so orbits stay exact. Warp is limited to 4× while the engine burns or in the air and 10× near the ground (a message says why), and drops when you enter a new sphere of influence.
+- **Time warp:** rotation always runs in fixed 1/120 s steps, so the attitude stays stable at any warp. RB faster, LB slower, from 1× to 10,000×. It only makes game time pass faster; the integrator takes smaller steps, so orbits stay exact. Warp is limited to 4× while the engine burns or in the air and 10× near the ground (a message says why), and drops when you enter a new sphere of influence.
 - **Views:** A cycles Rocket → Orbit map (around the body you're near) → Terra–Luna system. The right stick zooms, R3 resets the zoom.
-- **Steering:** with the assist on, point the left stick where the nose should face on screen (stick up = nose up). Let go and the assist keeps that heading. A panel at the bottom left shows whether the assist is on and what it's holding.
+- **Steering:** with the assist on, point the left stick where the nose should face on screen (stick up = nose up). Let go and the assist keeps that heading. An **Assists** panel at the bottom left lists every assist at once (attitude hold, direction lock, unlimited fuel, time warp) with its state and button, plus what the attitude assist is doing right now.
 - **Unlimited fuel:** a practice switch: **B** while flying, or the Start menu. Shared with landing mode. Tanks never drain; mass and thrust are unchanged, and there's no fuel bonus in the score.
 - **Steering aids:** a predicted path (including the Luna encounter), apoapsis and periapsis markers, the Luna phase angle, and D-pad holds for prograde, retrograde and radial.
 

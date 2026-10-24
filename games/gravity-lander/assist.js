@@ -171,30 +171,43 @@
   }
   function close() { openFlag = false; el.classList.remove("open"); }
 
-  // ---------- status panel drawn on the game canvas ----------
-  // o: { on, mode, detail, fuelInf }. Bottom-left corner at (x, yBottom).
+  // ---------- assists panel drawn on the game canvas ----------
+  // Lists every assist at once with its state and button, then what the
+  // attitude assist is doing right now.
+  //   o.rows: [{ name, value, on, key }]   on: true = active (green), false = off (grey)
+  //   o.mode, o.detail: two lines about the current attitude control
   function drawStatus(ctx, x, yBottom, o) {
-    const w = 310, h = 112, y = yBottom - h;
+    const w = 330, rowH = 22, h = 40 + o.rows.length * rowH + 50, y = yBottom - h;
     ctx.save();
-    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "rgba(10,12,18,0.8)";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "rgba(10,12,18,0.82)";
     ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill();
-    ctx.strokeStyle = o.on ? "rgba(61,220,132,0.6)" : "rgba(255,181,71,0.6)"; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = "#c9d1e0"; ctx.font = "800 13px system-ui, sans-serif";
-    ctx.fillText("ATTITUDE ASSIST", x + 14, y + 24);
-    // ON/OFF pill
-    ctx.fillStyle = o.on ? "#3ddc84" : "#ffb547";
-    ctx.beginPath(); ctx.roundRect(x + 140, y + 9, 54, 22, 11); ctx.fill();
-    ctx.fillStyle = "#0d0f14"; ctx.font = "900 13px system-ui, sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(o.on ? "ON" : "OFF", x + 167, y + 25);
-    ctx.textAlign = "left"; ctx.fillStyle = "#8a92a3"; ctx.font = "600 11px system-ui, sans-serif";
-    ctx.fillText("X: on/off", x + 204, y + 24);
-    ctx.fillStyle = "#fff"; ctx.font = "700 14px system-ui, sans-serif";
-    ctx.fillText(o.mode, x + 14, y + 48, w - 28);
+    ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.textAlign = "left"; ctx.fillStyle = "#c9d1e0"; ctx.font = "800 13px system-ui, sans-serif";
+    ctx.fillText("ASSISTS", x + 14, y + 24);
+    ctx.textAlign = "right"; ctx.fillStyle = "#5c6475"; ctx.font = "600 11px system-ui, sans-serif";
+    ctx.fillText("button", x + w - 14, y + 24);
+    let ry = y + 34;
+    for (const r of o.rows) {
+      // state pill
+      ctx.font = "900 11px system-ui, sans-serif";
+      const pw = Math.max(44, ctx.measureText(r.value).width + 16);
+      ctx.fillStyle = r.on ? "#3ddc84" : "#2a2f3a";
+      ctx.beginPath(); ctx.roundRect(x + 14, ry + 3, pw, 17, 8.5); ctx.fill();
+      ctx.textAlign = "center"; ctx.fillStyle = r.on ? "#0d0f14" : "#8a92a3";
+      ctx.fillText(r.value, x + 14 + pw / 2, ry + 15.5);
+      ctx.textAlign = "left"; ctx.fillStyle = r.on ? "#fff" : "#8a92a3"; ctx.font = "600 13px system-ui, sans-serif";
+      ctx.fillText(r.name, x + 24 + pw, ry + 16);
+      ctx.textAlign = "right"; ctx.fillStyle = "#4cc2ff"; ctx.font = "700 12px system-ui, sans-serif";
+      ctx.fillText(r.key, x + w - 14, ry + 16);
+      ry += rowH;
+    }
+    ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + 14, ry + 8); ctx.lineTo(x + w - 14, ry + 8); ctx.stroke();
+    ctx.textAlign = "left"; ctx.fillStyle = "#fff"; ctx.font = "700 13px system-ui, sans-serif";
+    ctx.fillText(o.mode, x + 14, ry + 27, w - 28);
     ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui, sans-serif";
-    ctx.fillText(o.detail, x + 14, y + 68, w - 28);
-    ctx.fillStyle = o.fuelInf ? "#3ddc84" : "#8a92a3"; ctx.font = "700 12px system-ui, sans-serif";
-    ctx.fillText(o.fuelInf ? "FUEL: UNLIMITED   (B: turn off)" : "FUEL: normal   (B: unlimited fuel)", x + 14, y + 96);
+    ctx.fillText(o.detail, x + 14, ry + 45, w - 28);
     ctx.restore();
   }
 
