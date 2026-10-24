@@ -2,9 +2,10 @@
 // menu (Start or Back opens it), and safe vibration.
 //
 //   Pad.setup({ hubUrl, title, items, holdToOpen, onMenu })
-//     items:      [{ label, action, keepOpen }] shown above "Back to hub"
+//     items:      [{ label, action, keepOpen }] shown above "Back to hub" (label may be a getter)
 //     holdToOpen: open the menu only after holding Start/Back (for pages that test those buttons)
 //     onMenu(open): called when the menu opens or closes
+//     canOpen():  optional; return false to stop Start/Back opening the menu
 //   Pad.poll() once per frame -> { connected, gp, id, down[], pressed[], lx, ly, rx, ry, lt, rt }
 //     While the menu is open, pressed[] is all false so the page ignores input.
 //   Pad.rumble(strong, weak, ms), Pad.stopRumble(), Pad.menuOpen()
@@ -69,7 +70,7 @@
     overlay = document.createElement("div");
     overlay.className = "padmenu";
     overlay.innerHTML = `<div class="box"><h2></h2><div class="list"></div>
-      <div class="hint">D-pad / stick to choose · A select · B close</div></div>`;
+      <div class="hint">D-pad / stick / arrow keys to choose · A or Enter select · B or Esc close</div></div>`;
     overlay.addEventListener("click", e => { if (e.target === overlay) setOpen(false); });
     document.body.appendChild(overlay);
     list = overlay.querySelector(".list");
@@ -126,6 +127,17 @@
     if (!gp) { last = res; holdBox.style.display = "none"; return res; }
 
     res.down = gp.buttons.map(b => b.pressed);
+    // Some drivers report the D-pad as a hat axis instead of buttons 12-15
+    if (gp.mapping !== "standard" && gp.axes.length > 9 && !res.down[BTN.UP] && !res.down[BTN.DOWN]) {
+      const h = gp.axes[9];
+      if (h >= -1.05 && h <= 1.05) {
+        const near = v => Math.abs(h - v) < 0.1;
+        res.down[BTN.UP] = near(-1) || near(-0.71) || near(1);
+        res.down[BTN.RIGHT] = near(-0.71) || near(-0.43) || near(-0.14);
+        res.down[BTN.DOWN] = near(-0.14) || near(0.14) || near(0.43);
+        res.down[BTN.LEFT] = near(0.43) || near(0.71) || near(1);
+      }
+    }
     // Ignore buttons already held when the page loaded (e.g. the A that opened it).
     if (!prev) prev = res.down.slice();
     const edge = res.down.map((d, i) => d && !prev[i]);
@@ -137,8 +149,11 @@
     last = res;
 
     const menuBtn = res.down[BTN.START] || res.down[BTN.BACK];
+    const allowed = !cfg.canOpen || cfg.canOpen();
     if (!open) {
-      if (cfg.holdToOpen) {
+      if (!allowed) {
+        holdStart = 0; holdBox.style.display = "none";
+      } else if (cfg.holdToOpen) {
         if (menuBtn) {
           if (!holdStart) holdStart = performance.now();
           const t = (performance.now() - holdStart) / HOLD_MS;
@@ -166,6 +181,21 @@
     }
     return res;
   }
+
+  // Keyboard works in the menu too: arrows choose, Enter selects, Esc opens/closes
+  window.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      if (open || !cfg.canOpen || cfg.canOpen()) setOpen(!open);
+      e.preventDefault(); return;
+    }
+    if (!open) return;
+    const n = allItems().length;
+    if (e.key === "ArrowDown") { sel = (sel + 1) % n; highlight(); }
+    else if (e.key === "ArrowUp") { sel = (sel - 1 + n) % n; highlight(); }
+    else if (e.key === "Enter" || e.key === " ") choose(sel);
+    else return;
+    e.preventDefault();
+  });
 
   function setup(options) {
     cfg = Object.assign(cfg, options);

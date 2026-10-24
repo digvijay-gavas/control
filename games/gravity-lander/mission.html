@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit Mission</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hub { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); color: #6b7385; font: 600 12px system-ui, sans-serif; text-decoration: none; }
+  #hub:hover { color: #4cc2ff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<a id="hub" href="../../">← Hub</a>
+<script src="../../shared/pad.js"></script>
+<script src="assist.js"></script>
+<script>
+// Orbit Mission: launch from Terra, reach orbit, transfer to Luna, get
+// captured, settle into lunar orbit and land. Each step is a checkpoint.
+//
+//   RT          throttle (analog) · LT fine throttle (up to 10%, for landing)
+//   Left stick  assist on: point the stick where the nose should face on screen (absolute);
+//               let go and the PID keeps that heading · assist off: thrusters directly
+//   D-pad       hold ▲ prograde · ▼ retrograde · ▶ radial out · ◀ radial in (press again to release)
+//   X           attitude assist on/off · Y separate stage · B unlimited fuel on/off
+//   LB / RB     time warp slower / faster (game time only)
+//   A           view: Rocket → Orbit map → Terra–Luna system · right stick zoom (R3 resets)
+//   Start/Back  menu: load checkpoint, restart, unlimited fuel, PID tuning, hub
+//
+// Physics, in SI units: Newton's gravity from both bodies at once (Luna moves on
+// a fixed circular orbit), thrust along the nose, mass loss from the rocket
+// equation, drag in Terra's exponential atmosphere. Time warp only makes game
+// time pass faster; the integrator takes smaller steps so the orbits stay exact.
+// The worlds are scaled down (like Kerbal Space Program) so a two-stage rocket
+// can make the trip.
+
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const B = Pad.BTN;
+const G0 = 9.80665;
+const TERRA = { name: "Terra", R: 600e3, mu: 3.5316e12, atmo: 70e3, rho0: 1.225, Hs: 5600, color: "#3a78c9", land: "#3f7d3a" };
+const LUNA = { name: "Luna", R: 200e3, mu: 6.5138e10, a: 12e6, color: "#9a9ca3" };
+LUNA.n = Math.sqrt(TERRA.mu / LUNA.a ** 3);
+LUNA.soi = LUNA.a * Math.pow(LUNA.mu / TERRA.mu, 0.4);
+const STAGES = [
+  { name: "Booster", dry: 3000, fuel: 20000, thrust: 440e3, isp: 300, alpha: 0.5, area: 8 },
+  { name: "Lander", dry: 2000, fuel: 3000, thrust: 40e3, isp: 330, alpha: 1.5, area: 5 },
+];
+const WARPS = [1, 2, 4, 10, 50, 100, 1000, 10000];
+const PHASE0 = 70 * Math.PI / 180;   // Luna's starting angle
+
+const PHASES = [
+  { name: "Lift off", goal: "Climb above 70 km, out of the atmosphere. Tip: lean east (right) as you climb.",
+    done: s => s.dom === TERRA && s.alt > 70e3 },
+  { name: "Reach orbit", goal: "Burn prograde (D-pad ▲) near apoapsis until periapsis is above 70 km.",
+    done: s => s.dom === TERRA && s.el.e < 1 && s.el.pe > 70e3 },
+  { name: "Transfer to Luna", goal: "Burn prograde when Luna is about 111° ahead, until your path reaches Luna's sphere of influence.",
+    done: s => s.dom === LUNA },
+  { name: "Get captured", goal: "Near periapsis, burn retrograde (D-pad ▼) until the whole orbit stays inside Luna's sphere of influence.",
+    done: s => s.dom === LUNA && s.el.e < 1 && s.el.ra < LUNA.soi * 0.9 && s.el.pe > 3e3 },
+  { name: "Stable lunar orbit", goal: "Make it round: periapsis above 10 km and apoapsis below 500 km.",
+    done: s => s.dom === LUNA && s.el.e < 1 && s.el.pe > 10e3 && s.el.ap < 500e3 },
+  { name: "Land on Luna", goal: "Burn retrograde to slow down, then touch down below 3 m/s, upright. LT gives fine throttle.",
+    done: s => s.landedOn === LUNA },
+];
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------- state ----------
+let state = "title", S, warpIdx = 0, mapView = false, zoomMul = 1, assist = true, hold = null;
+// view: 0 rocket (flight), 1 orbit map around the body you're near, 2 whole Terra–Luna system
+const VIEWS = ["Rocket", "Orbit map", "Terra–Luna system"];
+let aiming = false;   // assist on and the stick is pointing somewhere
+let view = 0, viewNote = 0, warpNote = null;
+
+// Unlimited fuel: a practice switch shared with landing mode. Tanks never drain;
+// everything else (mass, thrust, gravity) is unchanged.
+const FUEL_KEY = "gravity-lander-unlimited-fuel";
+let infFuel = false;
+try { infFuel = localStorage.getItem(FUEL_KEY) === "1"; } catch (e) {}
+function toggleFuel() {
+  infFuel = !infFuel;
+  try { localStorage.setItem(FUEL_KEY, infFuel ? "1" : "0"); } catch (e) {}
+  if (infFuel && S) for (let i = S.stage; i < STAGES.length; i++) S.fuel[i] = STAGES[i].fuel;
+  Pad.setup({});   // refresh the menu label
+}
+let pred = { pts: [], lunaPts: [], enc: null, at: 0 }, banner = null, parts = [], debris = [];
+
+function newMission(save = true) {
+  S = {
+    t: 0, x: 0, y: TERRA.R, vx: 0, vy: 0, th: Math.PI / 2, om: 0, target: Math.PI / 2,
+    stage: 0, fuel: [STAGES[0].fuel, STAGES[1].fuel], landedOn: TERRA, landOff: [0, TERRA.R],
+    phase: 0, score: 0, thr: 0, crashed: null, best: {},
+  };
+  warpIdx = 0; hold = null; Assist.pid.reset(); debris = []; parts = []; banner = null; lastDom = TERRA;
+  if (save) saveCheckpoint();
+}
+
+// Luna orbits clockwise on screen, the same way you fly after leaning right (east) at launch
+function lunaPos(t) {
+  const a = PHASE0 - LUNA.n * t;
+  return [LUNA.a * Math.cos(a), LUNA.a * Math.sin(a), LUNA.a * LUNA.n * Math.sin(a), -LUNA.a * LUNA.n * Math.cos(a)];
+}
+
+function mass(s) {
+  let m = 0;
+  for (let i = s.stage; i < STAGES.length; i++) m += STAGES[i].dry + s.fuel[i];
+  return m;
+}
+function deltaV(s) {
+  // Remaining delta-v of every stage still attached (rocket equation, stage by stage)
+  let dv = 0;
+  for (let i = s.stage; i < STAGES.length; i++) {
+    let above = 0;
+    for (let j = i + 1; j < STAGES.length; j++) above += STAGES[j].dry + s.fuel[j];
+    const m0 = STAGES[i].dry + s.fuel[i] + above, m1 = STAGES[i].dry + above;
+    dv += STAGES[i].isp * G0 * Math.log(m0 / m1);
+  }
+  return dv;
+}
+
+// Gravity from both bodies, plus drag in Terra's air
+function accel(x, y, vx, vy, t, out) {
+  const r2 = x * x + y * y, r = Math.sqrt(r2);
+  let ax = -TERRA.mu * x / (r2 * r), ay = -TERRA.mu * y / (r2 * r);
+  const [lx, ly] = lunaPos(t), dx = x - lx, dy = y - ly, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+  ax -= LUNA.mu * dx / (d2 * d); ay -= LUNA.mu * dy / (d2 * d);
+  out.rho = 0;
+  const h = r - TERRA.R;
+  if (h < TERRA.atmo) out.rho = TERRA.rho0 * Math.exp(-h / TERRA.Hs);
+  out.ax = ax; out.ay = ay; out.r = r; out.d = d;
+  return out;
+}
+
+function dominant(x, y, t) {
+  const [lx, ly] = lunaPos(t);
+  return Math.hypot(x - lx, y - ly) < LUNA.soi ? LUNA : TERRA;
+}
+
+// Orbital elements relative to a body (osculating conic)
+function elements(s, body) {
+  let rx = s.x, ry = s.y, vx = s.vx, vy = s.vy;
+  if (body === LUNA) { const [lx, ly, lvx, lvy] = lunaPos(s.t); rx -= lx; ry -= ly; vx -= lvx; vy -= lvy; }
+  const r = Math.hypot(rx, ry), v2 = vx * vx + vy * vy, mu = body.mu;
+  const h = rx * vy - ry * vx;
+  const rv = rx * vx + ry * vy;
+  const ex = ((v2 - mu / r) * rx - rv * vx) / mu, ey = ((v2 - mu / r) * ry - rv * vy) / mu;
+  const e = Math.hypot(ex, ey);
+  const rp = h * h / (mu * (1 + e)), ra = e < 1 ? h * h / (mu * (1 - e)) : Infinity;
+  return { e, pe: rp - body.R, ap: ra - body.R, rp, ra, ex, ey, h, rx, ry, vx, vy, r, v: Math.sqrt(v2),
+           period: e < 1 ? 2 * Math.PI * Math.sqrt(((rp + ra) / 2) ** 3 / mu) : Infinity };
+}
+
+// ---------- simulation ----------
+const tmp = {};
+function stepPhysics(dt, ctl) {
+  const st = STAGES[S.stage];
+  const m = mass(S);
+  let thr = S.fuel[S.stage] > 0 ? ctl.thr : 0;
+  const F = st.thrust * thr;
+  S.thr = thr;
+
+  // Attitude: PID holds a heading, or the stick drives the thrusters directly
+  const maxAlpha = st.alpha * (STAGES[S.stage].dry + STAGES[S.stage].fuel + (S.stage === 0 ? STAGES[1].dry + STAGES[1].fuel : 0)) / m;
+  let alpha;
+  if (S.landedOn) alpha = 0;
+  else if (assist) {
+    if (hold) { const dir = holdDir(); if (dir !== null) S.target = dir; }
+    alpha = Assist.pid.update(wrap(S.target - S.th), S.om, dt, maxAlpha);
+  } else alpha = -ctl.turn * maxAlpha;
+  S.om += alpha * dt; S.th = wrap(S.th + S.om * dt);
+
+  // Translation: gravity + thrust + drag (semi-implicit Euler with small steps)
+  accel(S.x, S.y, S.vx, S.vy, S.t, tmp);
+  let ax = tmp.ax + Math.cos(S.th) * F / m, ay = tmp.ay + Math.sin(S.th) * F / m;
+  if (tmp.rho > 0) {
+    const v = Math.hypot(S.vx, S.vy), k = 0.5 * tmp.rho * 0.4 * st.area * v / m;
+    ax -= k * S.vx; ay -= k * S.vy;
+  }
+  if (!infFuel) S.fuel[S.stage] = Math.max(0, S.fuel[S.stage] - F / (st.isp * G0) * dt);
+
+  if (S.landedOn) {
+    // Resting on the ground until thrust beats local gravity. Advance the clock
+    // first so the craft sits where the (moving) body is at the new time.
+    S.t += dt;
+    const body = S.landedOn, [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+    const ux = S.landOff[0] / body.R, uy = S.landOff[1] / body.R;
+    // Acceleration relative to the body (Luna itself is accelerating around Terra)
+    const bax = body === LUNA ? -LUNA.n * LUNA.n * bx : 0, bay = body === LUNA ? -LUNA.n * LUNA.n * by : 0;
+    if ((ax - bax) * ux + (ay - bay) * uy > 0.05 && F > 0) {
+      S.landedOn = null;
+      S.vx = bvx + ux * 0.5; S.vy = bvy + uy * 0.5;
+    } else {
+      S.x = bx + S.landOff[0]; S.y = by + S.landOff[1]; S.vx = bvx; S.vy = bvy;
+      return;
+    }
+    S.t -= dt;   // lifting off: the normal step below advances the clock
+  }
+  S.vx += ax * dt; S.vy += ay * dt;
+  S.x += S.vx * dt; S.y += S.vy * dt;
+  S.t += dt;
+
+  // Ground contact
+  for (const body of [TERRA, LUNA]) {
+    const [bx, by, bvx, bvy] = body === LUNA ? lunaPos(S.t) : [0, 0, 0, 0];
+    const dx = S.x - bx, dy = S.y - by, r = Math.hypot(dx, dy);
+    if (r > body.R) continue;
+    const ux = dx / r, uy = dy / r, rvx = S.vx - bvx, rvy = S.vy - bvy;
+    const down = -(rvx * ux + rvy * uy), side = Math.abs(rvx * -uy + rvy * ux);
+    const tilt = Math.abs(wrap(S.th - Math.atan2(uy, ux)));
+    if (down < 3 && side < 2 && tilt < 15 * Math.PI / 180) {
+      S.landedOn = body; S.landOff = [ux * body.R, uy * body.R]; S.om = 0;
+      S.x = bx + S.landOff[0]; S.y = by + S.landOff[1]; S.vx = bvx; S.vy = bvy;
+      S.touch = { down, side };
+      Pad.rumble(0.3, 0.4, 200);
+    } else {
+      const why = [];
+      if (down >= 3) why.push(`hit the ground at ${down.toFixed(1)} m/s (max 3)`);
+      if (side >= 2) why.push(`sliding ${side.toFixed(1)} m/s (max 2)`);
+      if (tilt >= 15 * Math.PI / 180) why.push(`tilted ${Math.round(tilt * 180 / Math.PI)}° (max 15)`);
+      crash(`Crashed on ${body.name}: ${why.join(", ")}.`);
+    }
+    break;
+  }
+}
+
+function holdDir() {
+  const dom = dominant(S.x, S.y, S.t);
+  let vx = S.vx, vy = S.vy, rx = S.x, ry = S.y;
+  if (dom === LUNA) { const [lx, ly, lvx, lvy] = lunaPos(S.t); vx -= lvx; vy -= lvy; rx -= lx; ry -= ly; }
+  if (hold === "pro" || hold === "retro") {
+    if (Math.hypot(vx, vy) < 1) return null;
+    const a = Math.atan2(vy, vx);
+    return hold === "pro" ? a : wrap(a + Math.PI);
+  }
+  const a = Math.atan2(ry, rx);
+  return hold === "out" ? a : wrap(a + Math.PI);
+}
+
+function crash(msg) {
+  S.crashed = msg; state = "crashed";
+  for (let i = 0; i < 80; i++) {
+    const a = Math.random() * Math.PI * 2, s = 5 + Math.random() * 40;
+    parts.push({ x: S.x, y: S.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1.5 + Math.random(), c: Math.random() < 0.5 ? "#ffb547" : "#ff5c3a" });
+  }
+  Pad.rumble(1, 1, 500);
+}
+
+function stage() {
+  if (S.stage >= STAGES.length - 1) return;
+  const st = STAGES[S.stage];
+  debris.push({ x: S.x, y: S.y, vx: S.vx - Math.cos(S.th) * 5, vy: S.vy - Math.sin(S.th) * 5, th: S.th, life: 25 });
+  S.stage++;
+  Pad.rumble(0.6, 0.4, 200);
+  banner = { text: `${st.name} separated`, sub: `Now flying on the ${STAGES[S.stage].name} stage`, until: performance.now() + 2500 };
+}
+
+// ---------- checkpoints ----------
+const KEY = "orbit-mission-checkpoint";
+let checkpoint = null;
+function saveCheckpoint() {
+  checkpoint = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
+  try { localStorage.setItem(KEY, JSON.stringify(checkpoint)); } catch (e) {}
+}
+function loadCheckpoint() {
+  let cp = checkpoint;
+  if (!cp) { try { cp = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {} }
+  if (!cp) return false;
+  S = JSON.parse(JSON.stringify(cp));
+  S.landedOn = S.landedOn === "Terra" ? TERRA : S.landedOn === "Luna" ? LUNA : null;
+  S.crashed = null; S.om = 0; S.target = S.th;
+  if (infFuel) for (let i = S.stage; i < STAGES.length; i++) S.fuel[i] = STAGES[i].fuel;
+  warpIdx = 0; hold = null; Assist.pid.reset(); parts = []; debris = [];
+  pred.at = 0; banner = null; lastDom = dominant(S.x, S.y, S.t);
+  return true;
+}
+// A finished mission isn't worth continuing; only offer unfinished ones
+function hasSaved() {
+  try { const cp = JSON.parse(localStorage.getItem(KEY) || "null"); return !!cp && cp.phase < PHASES.length; }
+  catch (e) { return false; }
+}
+
+// ---------- prediction ----------
+function predict() {
+  const s = { x: S.x, y: S.y, vx: S.vx, vy: S.vy, t: S.t };
+  const pts = [], lunaPts = [];
+  let enc = null, steps = 0;
+  const o = {};
+  const el = elements(S, dominant(S.x, S.y, S.t));
+  const horizon = Math.min(isFinite(el.period) ? el.period * 1.05 : 4 * 86400, 4 * 86400);
+  if (S.landedOn) { pred = { pts, lunaPts, enc, at: performance.now() }; return; }
+  while (s.t - S.t < horizon && steps < 6000) {
+    accel(s.x, s.y, s.vx, s.vy, s.t, o);
+    const near = Math.min(o.r - TERRA.R + 1000, o.d - LUNA.R + 1000);
+    const nearMu = o.d < LUNA.soi ? LUNA.mu : TERRA.mu, nearR = o.d < LUNA.soi ? o.d : o.r;
+    let h = 0.01 * Math.sqrt(nearR ** 3 / nearMu);
+    h = clamp(h, 0.5, 600);
+    if (near < 50e3) h = Math.min(h, 2);
+    if (o.rho > 0) { const v = Math.hypot(s.vx, s.vy), k = 0.5 * o.rho * 0.4 * STAGES[S.stage].area * v / mass(S); o.ax -= k * s.vx; o.ay -= k * s.vy; }
+    s.vx += o.ax * h; s.vy += o.ay * h; s.x += s.vx * h; s.y += s.vy * h; s.t += h; steps++;
+    const [lx, ly] = lunaPos(s.t);
+    if (steps % 4 === 0) { pts.push([s.x, s.y]); lunaPts.push([s.x - lx, s.y - ly]); }
+    if (!enc && dominant(S.x, S.y, S.t) === TERRA && Math.hypot(s.x - lx, s.y - ly) < LUNA.soi) enc = { x: s.x, y: s.y, t: s.t, lx, ly };
+    if (Math.hypot(s.x, s.y) < TERRA.R || Math.hypot(s.x - lx, s.y - ly) < LUNA.R) { pts.push([s.x, s.y]); lunaPts.push([s.x - lx, s.y - ly]); break; }
+  }
+  pred = { pts, lunaPts, enc, at: performance.now() };
+}
+
+// ---------- update ----------
+function situation() {
+  const dom = dominant(S.x, S.y, S.t);
+  const el = elements(S, dom);
+  return { dom, el, alt: el.r - dom.R, landedOn: S.landedOn };
+}
+
+// Fast warp is only allowed coasting in space; burns and low flight run near real time
+function maxWarp(sit, thr = S.thr) {
+  if (thr > 0.001) return 2;
+  if (sit.dom === TERRA && sit.alt < TERRA.atmo && !S.landedOn) return 2;
+  if (sit.alt < 20e3 && !S.landedOn) return 3;
+  return WARPS.length - 1;
+}
+
+function warpLimitReason() {
+  const sit = situation();
+  if (S.thr > 0.001 || Pad.poll().rt > 0.001) return `Engine burning: warp limited to ${WARPS[2]}×`;
+  if (sit.dom === TERRA && sit.alt < TERRA.atmo && !S.landedOn) return `In the atmosphere: warp limited to ${WARPS[2]}×`;
+  return `Close to the ground: warp limited to ${WARPS[3]}×`;
+}
+
+let lastDom = TERRA;
+function update(dt, p) {
+  if (p.pressed[B.X]) { assist = !assist; Assist.pid.reset(); S.target = S.th; hold = null; }
+  if (p.pressed[B.Y]) stage();
+  if (p.pressed[B.A]) { view = (view + 1) % VIEWS.length; mapView = view > 0; zoomMul = 1; viewNote = performance.now() + 2000; }
+  if (p.pressed[B.R3]) zoomMul = 1;
+  if (p.pressed[B.RB]) {
+    warpIdx = Math.min(WARPS.length - 1, warpIdx + 1);
+    const cap = maxWarp(situation(), Math.max(p.rt, p.lt * 0.1));
+    if (warpIdx > cap) warpNote = { text: warpLimitReason(), until: performance.now() + 2200 };
+  }
+  if (p.pressed[B.LB]) warpIdx = Math.max(0, warpIdx - 1);
+  const holds = { [B.UP]: "pro", [B.DOWN]: "retro", [B.RIGHT]: "out", [B.LEFT]: "in" };
+  for (const k in holds) if (p.pressed[k]) { hold = hold === holds[k] ? null : holds[k]; if (!hold) S.target = S.th; if (!assist) assist = true; }
+  if (p.pressed[B.B]) toggleFuel();
+  // Assist: the stick is an absolute pointer on screen. Screen angle -> world angle
+  // undoes the camera rotation, so "stick up" always means "nose up on screen".
+  aiming = assist && Math.hypot(p.lx, p.ly) > 0.4;
+  if (aiming) { hold = null; S.target = wrap(Math.atan2(-p.ly, p.lx) + (cam.rot || 0)); }
+  else if (!assist && Math.abs(p.lx) > 0.2) hold = null;
+  zoomMul = clamp(zoomMul * Math.pow(2, -p.ry * dt * 2.5), 0.02, 50);
+
+  const thr = Math.max(p.rt, p.lt * 0.1);
+  let sit = situation();
+  warpIdx = Math.min(warpIdx, maxWarp(sit, thr));
+  const warp = WARPS[warpIdx];
+
+  // Integrate with steps small enough for accuracy at this warp
+  let remaining = dt * warp, guard = 0;
+  while (remaining > 1e-6 && guard++ < 4000 && state === "play") {
+    const o = accel(S.x, S.y, S.vx, S.vy, S.t, {});
+    const nearR = Math.min(o.r, o.d), nearMu = o.d < LUNA.soi ? LUNA.mu : TERRA.mu;
+    let h = clamp(0.002 * Math.sqrt(nearR ** 3 / nearMu), 0.01, 20);
+    if (thr > 0.001 || !S.landedOn && (o.r - TERRA.R < 100e3 || o.d - LUNA.R < 30e3)) h = Math.min(h, 1 / 60);
+    h = Math.min(h, remaining);
+    stepPhysics(h, { thr, turn: p.lx });
+    remaining -= h;
+  }
+
+  sit = situation();
+  if (sit.dom !== lastDom) {
+    warpIdx = Math.min(warpIdx, 3);
+    banner = { text: `Entered ${sit.dom.name}'s sphere of influence`, sub: sit.dom === LUNA ? "Luna's gravity now dominates" : "Back under Terra's gravity", until: performance.now() + 3000 };
+    lastDom = sit.dom; pred.at = 0;
+  }
+
+  // Assignments
+  if (state === "play" && S.phase < PHASES.length && PHASES[S.phase].done(sit)) {
+    const ph = PHASES[S.phase];
+    const fuelBonus = infFuel ? 0 : Math.round(deltaV(S) / 10);
+    let pts = 100 + (S.phase === PHASES.length - 1 ? fuelBonus + Math.round((3 - S.touch.down) * 50) : 0);
+    S.score += pts; S.phase++;
+    Pad.rumble(0.3, 0.5, 250);
+    if (S.phase >= PHASES.length) { state = "complete"; saveCheckpoint(); }
+    else {
+      banner = { text: `✓ ${ph.name}  +${pts}`, sub: `Checkpoint saved · next: ${PHASES[S.phase].name}`, until: performance.now() + 3500 };
+      saveCheckpoint();
+    }
+  }
+  if (performance.now() - pred.at > (warp > 10 ? 120 : 250)) predict();
+
+  for (const q of parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; }
+  parts = parts.filter(q => q.life > 0);
+  for (const d of debris) {
+    accel(d.x, d.y, d.vx, d.vy, S.t, tmp);
+    d.vx += tmp.ax * dt * warp; d.vy += tmp.ay * dt * warp; d.x += d.vx * dt * warp; d.y += d.vy * dt * warp; d.th += 0.3 * dt; d.life -= dt;
+  }
+  debris = debris.filter(d => d.life > 0 && Math.hypot(d.x, d.y) > TERRA.R);
+  if (S.thr > 0.05) Pad.rumble(S.thr * 0.3, S.thr * 0.3, 160);
+}
+
+// ---------- rendering ----------
+let cam = { x: 0, y: TERRA.R, k: 1 };
+const stars = Array.from({ length: 220 }, () => [Math.random(), Math.random(), Math.random() * 1.4 + 0.3]);
+
+function camera(sit) {
+  let cx, cy, k;
+  if (view === 2) {
+    // Whole system: Terra and Luna's full orbit
+    cx = 0; cy = 0; k = H / (2.4 * LUNA.a * 1.15);
+  } else if (mapView) {
+    const [lx, ly] = lunaPos(S.t);
+    if (sit.dom === LUNA) { cx = lx; cy = ly; k = H / (2.4 * clamp(Math.max(sit.el.r, isFinite(sit.el.ra) ? sit.el.ra : LUNA.soi), LUNA.R * 1.3, LUNA.soi * 1.2)); }
+    else {
+      cx = 0; cy = 0;
+      const far = Math.max(sit.el.r, isFinite(sit.el.ra) ? Math.min(sit.el.ra, LUNA.a * 1.3) : LUNA.a * 1.3, pred.enc ? LUNA.a * 1.2 : 0);
+      k = H / (2.4 * Math.max(far, TERRA.R * 1.4));
+    }
+  } else {
+    cx = S.x; cy = S.y;
+    const view = clamp(sit.alt * 2.2 + 400, 600, 3e6);
+    k = H / view;
+  }
+  k *= zoomMul;
+  cam.x = cx; cam.y = cy; cam.k = k;
+}
+const SX = x => W / 2 + (x - cam.x) * cam.k;
+const SY = y => H / 2 - (y - cam.y) * cam.k;
+
+function drawBody(body, bx, by) {
+  const R = body.R * cam.k, sx = SX(bx), sy = SY(by);
+  // Skip if off screen (distance test, so it still works with the view rotated)
+  if (Math.hypot(sx - W / 2, sy - H / 2) - R > Math.hypot(W, H) / 2 + 50) return;
+  if (R < 30000) {
+    if (body === TERRA) {
+      const g = ctx.createRadialGradient(sx, sy, R, sx, sy, R + TERRA.atmo * cam.k);
+      g.addColorStop(0, "rgba(90,160,255,0.35)"); g.addColorStop(1, "rgba(90,160,255,0)");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, R + TERRA.atmo * cam.k, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = body === TERRA ? TERRA.color : LUNA.color;
+    ctx.beginPath(); ctx.arc(sx, sy, Math.max(R, 2), 0, Math.PI * 2); ctx.fill();
+    if (body === TERRA && R > 6) {
+      ctx.fillStyle = TERRA.land;
+      for (const [a, s] of [[0.3, 0.5], [2.1, 0.4], [3.9, 0.6], [5.2, 0.3]]) {
+        ctx.beginPath(); ctx.arc(sx + Math.cos(a) * R * 0.5, sy - Math.sin(a) * R * 0.5, R * s * 0.5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    if (body === LUNA && R > 6) {
+      ctx.fillStyle = "rgba(0,0,0,0.15)";
+      for (const [a, s] of [[0.5, 0.2], [2.4, 0.15], [4.0, 0.25]]) { ctx.beginPath(); ctx.arc(sx + Math.cos(a) * R * 0.5, sy - Math.sin(a) * R * 0.5, R * s, 0, Math.PI * 2); ctx.fill(); }
+    }
+  } else {
+    // Huge on screen: draw the local surface as a polygon around the camera
+    const ca = Math.atan2(cam.y - by, cam.x - bx), span = (Math.max(W, H) / R) * 1.5;
+    ctx.beginPath();
+    for (let i = 0; i <= 64; i++) {
+      const a = ca - span + (2 * span * i) / 64;
+      const px = SX(bx + Math.cos(a) * body.R), py = SY(by + Math.sin(a) * body.R);
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    const deep = body.R - Math.max(W, H) / cam.k * 2;
+    ctx.lineTo(SX(bx + Math.cos(ca + span) * deep), SY(by + Math.sin(ca + span) * deep));
+    ctx.lineTo(SX(bx + Math.cos(ca - span) * deep), SY(by + Math.sin(ca - span) * deep));
+    ctx.closePath();
+    ctx.fillStyle = body === TERRA ? TERRA.land : LUNA.color; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.3)"; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+}
+
+function drawRocket(x, y, th, size, alpha = 1, stageIdx = S.stage, flame = 0) {
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.translate(SX(x), SY(y)); ctx.rotate(-th + Math.PI / 2);
+  const s = size / 30;
+  ctx.scale(s, s);
+  if (flame > 0.02) {
+    const len = 10 + flame * 30 * (0.8 + Math.random() * 0.4);
+    const g = ctx.createLinearGradient(0, 0, 0, len);
+    g.addColorStop(0, "rgba(255,240,200,0.95)"); g.addColorStop(1, "rgba(255,90,30,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(-4, stageIdx === 0 ? 14 : 2); ctx.lineTo(0, (stageIdx === 0 ? 14 : 2) + len); ctx.lineTo(4, stageIdx === 0 ? 14 : 2); ctx.fill();
+  }
+  // lander (always on top)
+  ctx.fillStyle = "#d9a441"; ctx.fillRect(-5, -6, 10, 7);
+  ctx.fillStyle = "#e9ebef"; ctx.beginPath(); ctx.moveTo(-4, -6); ctx.lineTo(0, -15); ctx.lineTo(4, -6); ctx.fill();
+  ctx.strokeStyle = "#c9ccd3"; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(-4, 1); ctx.lineTo(-8, 4); ctx.moveTo(4, 1); ctx.lineTo(8, 4); ctx.stroke();
+  if (stageIdx === 0) {
+    ctx.fillStyle = "#f2f2f2"; ctx.fillRect(-5, 1, 10, 13);
+    ctx.fillStyle = "#e5484d"; ctx.fillRect(-5, 6, 10, 2);
+    ctx.fillStyle = "#555a63"; ctx.beginPath(); ctx.moveTo(-6, 14); ctx.lineTo(-8, 17); ctx.lineTo(-3, 14); ctx.moveTo(6, 14); ctx.lineTo(8, 17); ctx.lineTo(3, 14); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPath(sit) {
+  if (!pred.pts.length) return;
+  const useLuna = sit.dom === LUNA;
+  const [lx, ly] = lunaPos(S.t);
+  const pts = useLuna ? pred.lunaPts : pred.pts;
+  ctx.strokeStyle = "rgba(255,255,255,0.75)"; ctx.lineWidth = 1.6; ctx.setLineDash([]);
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => {
+    const wx = useLuna ? x + lx : x, wy = useLuna ? y + ly : y;
+    i ? ctx.lineTo(SX(wx), SY(wy)) : ctx.moveTo(SX(wx), SY(wy));
+  });
+  ctx.stroke();
+  if (pred.enc && !useLuna) {
+    ctx.strokeStyle = "rgba(255,181,71,0.8)"; ctx.setLineDash([4, 6]);
+    ctx.beginPath(); ctx.arc(SX(pred.enc.lx), SY(pred.enc.ly), LUNA.soi * cam.k, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "#ffb547"; ctx.font = "700 12px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("Luna encounter", SX(pred.enc.x), SY(pred.enc.y) - 10);
+    ctx.beginPath(); ctx.arc(SX(pred.enc.x), SY(pred.enc.y), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // Apoapsis / periapsis markers from the conic
+  const el = sit.el, body = sit.dom, [bx, by] = body === LUNA ? [lx, ly] : [0, 0];
+  if (el.e > 1e-3) {
+    const ux = el.ex / el.e, uy = el.ey / el.e;
+    const mark = (r, label, dir) => {
+      const px = SX(bx + ux * r * dir), py = SY(by + uy * r * dir);
+      ctx.fillStyle = "#4cc2ff"; ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.font = "700 12px system-ui"; ctx.textAlign = "left"; ctx.fillText(label, px + 7, py - 6);
+    };
+    mark(el.rp, `Pe ${fmtDist(el.pe)}`, 1);
+    if (isFinite(el.ra) && el.ra < LUNA.a * 2) mark(el.ra, `Ap ${fmtDist(el.ap)}`, -1);
+  }
+}
+
+function fmtDist(m) {
+  if (!isFinite(m)) return "∞";
+  if (Math.abs(m) >= 1e6) return (m / 1e3).toFixed(0) + " km";
+  if (Math.abs(m) >= 1e4) return (m / 1e3).toFixed(1) + " km";
+  return m.toFixed(0) + " m";
+}
+function fmtTime(t) {
+  const d = Math.floor(t / 86400), h = Math.floor(t / 3600) % 24, m = Math.floor(t / 60) % 60, s = Math.floor(t) % 60;
+  return (d ? d + "d " : "") + String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+function drawAttitude(sit) {
+  // Small attitude indicator: nose, target and prograde
+  const cx = W / 2, cy = H - 104, r = 46;
+  ctx.fillStyle = "rgba(10,12,18,0.75)"; ctx.beginPath(); ctx.arc(cx, cy, r + 8, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  // Same orientation as the screen, so it matches the stick
+  const up = (cam.rot || 0) + Math.PI / 2;
+  const P = (a, rr) => [cx + Math.cos(a - up + Math.PI / 2) * rr, cy - Math.sin(a - up + Math.PI / 2) * rr];
+  ctx.fillStyle = "#5c6475"; ctx.font = "700 10px system-ui"; ctx.textAlign = "center";
+  if (!mapView) ctx.fillText("UP", cx, cy - r + 12);
+  if (sit.el.v > 1) {
+    const pa = Math.atan2(sit.el.vy, sit.el.vx);
+    let [x, y] = P(pa, r - 6); ctx.strokeStyle = "#3ddc84"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke();
+    [x, y] = P(pa + Math.PI, r - 6); ctx.beginPath(); ctx.moveTo(x - 4, y - 4); ctx.lineTo(x + 4, y + 4); ctx.moveTo(x + 4, y - 4); ctx.lineTo(x - 4, y + 4); ctx.stroke();
+  }
+  if (assist) { const [x, y] = P(S.target, r - 2); ctx.strokeStyle = "#ffb547"; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke(); ctx.setLineDash([]); }
+  const [nx, ny] = P(S.th, r - 4); ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(nx, ny); ctx.stroke();
+}
+
+// Angle as shown on screen: 0° = up, clockwise positive like a compass
+const screenDeg = a => ((Math.round(90 - (a - (cam.rot || 0)) * 180 / Math.PI) % 360) + 360) % 360;
+function drawStatus() {
+  let mode, detail;
+  const err = Math.abs(wrap(S.target - S.th)) * 180 / Math.PI;
+  if (!assist) {
+    mode = "Manual: stick ◀▶ fires the rotation thrusters";
+    detail = "Spin keeps going until you counter it · X: assist on";
+  } else {
+    const holdName = { pro: "prograde (direction of travel)", retro: "retrograde (against travel)", out: "radial out (straight up)", in: "radial in (straight down)" }[hold];
+    mode = hold ? `Holding ${holdName}` : aiming ? `Pointing where the stick points: ${screenDeg(S.target)}°` : `Holding heading ${screenDeg(S.target)}°`;
+    detail = `Nose ${screenDeg(S.th)}° · off by ${err.toFixed(1)}° · Kp ${Assist.gains.kp.toFixed(1)} Ki ${Assist.gains.ki.toFixed(2)} Kd ${Assist.gains.kd.toFixed(1)}`;
+  }
+  Assist.drawStatus(ctx, 14, H - 30, { on: assist, mode, detail, fuelInf: infFuel });
+}
+
+function row(label, value, y, color) {
+  ctx.fillStyle = "#8a92a3"; ctx.font = "600 12px system-ui"; ctx.textAlign = "left"; ctx.fillText(label, W - 262, y);
+  ctx.fillStyle = color || "#e6e8ee"; ctx.font = "700 14px ui-monospace, Consolas, monospace"; ctx.textAlign = "right"; ctx.fillText(value, W - 22, y);
+}
+
+function drawHUD(sit) {
+  // Assignment card (left)
+  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(14, 14, 330, 74 + PHASES.length * 20, 12); ctx.fill();
+  ctx.textAlign = "left";
+  const ph = PHASES[Math.min(S.phase, PHASES.length - 1)];
+  ctx.fillStyle = "#ffb547"; ctx.font = "700 12px system-ui"; ctx.fillText(`ASSIGNMENT ${Math.min(S.phase + 1, PHASES.length)} / ${PHASES.length}`, 28, 36);
+  ctx.fillStyle = "#fff"; ctx.font = "800 17px system-ui"; ctx.fillText(ph.name, 28, 56);
+  ctx.fillStyle = "#c9d1e0"; ctx.font = "500 12px system-ui";
+  wrapText(ph.goal, 28, 74, 300, 15);
+  PHASES.forEach((p, i) => {
+    ctx.fillStyle = i < S.phase ? "#3ddc84" : i === S.phase ? "#fff" : "#5c6475";
+    ctx.font = "600 12px system-ui";
+    ctx.fillText(`${i < S.phase ? "✓" : i === S.phase ? "▸" : "○"} ${p.name}`, 28, 112 + i * 20);
+  });
+
+  // Telemetry (right)
+  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(W - 276, 14, 262, 330, 12); ctx.fill();
+  let y = 38;
+  const el = sit.el;
+  const rad = (el.rx * el.vx + el.ry * el.vy) / el.r;
+  row("Near", sit.dom.name + (S.landedOn ? " (landed)" : ""), y); y += 22;
+  row("Altitude", fmtDist(sit.alt), y); y += 22;
+  row("Speed", el.v.toFixed(1) + " m/s", y); y += 22;
+  row("Vertical speed", (rad >= 0 ? "+" : "") + rad.toFixed(1) + " m/s", y, rad < -3 && sit.alt < 5e3 ? "#ff6b5c" : undefined); y += 22;
+  // Orbit numbers mean nothing while sitting on the ground
+  row("Apoapsis", S.landedOn ? "—" : el.e < 1 ? fmtDist(el.ap) : "escape", y); y += 22;
+  row("Periapsis", S.landedOn ? "—" : fmtDist(el.pe), y, S.landedOn ? undefined : el.pe < (sit.dom === TERRA ? 70e3 : 10e3) ? "#ffb547" : "#3ddc84"); y += 22;
+  row("Eccentricity", S.landedOn ? "—" : el.e.toFixed(3), y); y += 22;
+  if (sit.dom === TERRA && S.phase === 2) {
+    const [lx, ly] = lunaPos(S.t);
+    const ang = wrap(Math.atan2(S.y, S.x) - Math.atan2(ly, lx)) * 180 / Math.PI;   // Luna ahead, clockwise
+    row("Luna phase angle", `${ang.toFixed(0)}° (ideal 111°)`, y, Math.abs(ang - 111) < 8 ? "#3ddc84" : undefined); y += 22;
+  }
+  const m = mass(S), st = STAGES[S.stage];
+  row("Stage", `${S.stage + 1}/2 ${st.name}`, y); y += 22;
+  if (infFuel) { row("Fuel", "∞ unlimited", y, "#3ddc84"); y += 22; row("Δv left", "∞", y); y += 22; }
+  else {
+    row("Fuel", `${Math.round(S.fuel[S.stage])} kg`, y, S.fuel[S.stage] < st.fuel * 0.1 ? "#ff6b5c" : undefined); y += 22;
+    row("Δv left", `${Math.round(deltaV(S))} m/s`, y); y += 22;
+  }
+  const gLocal = sit.dom.mu / (el.r * el.r);
+  row("Thrust/weight", (S.fuel[S.stage] > 0 ? st.thrust / (m * gLocal) : 0).toFixed(2), y); y += 22;
+  row("Time warp", `${WARPS[warpIdx]}×` + (warpIdx === maxWarp(sit) && warpIdx < WARPS.length - 1 ? " (max here)" : ""), y, WARPS[warpIdx] > 1 ? "#4cc2ff" : undefined); y += 22;
+  row("Mission time", "T+ " + fmtTime(S.t), y); y += 22;
+  row("Score", String(S.score), y, "#ffb547");
+
+  // Fuel bars
+  ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(W - 262, 352, 248, 6);
+  ctx.fillStyle = "#4cc2ff"; ctx.fillRect(W - 262, 352, 248 * S.thr, 6);
+
+  drawAttitude(sit);
+  drawStatus();
+
+  ctx.textAlign = "left"; ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.font = "600 12px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText(`RT throttle · LT fine · Stick point · D-pad ▲pro ▼retro ▶out ◀in · X assist · Y stage · B fuel ∞ · LB/RB time warp · A view (${VIEWS[view]}) · RS zoom · Start menu`, 14, H - 14);
+
+  // Big time-warp badge and view name, top centre
+  ctx.textAlign = "center";
+  const now = performance.now();
+  if (WARPS[warpIdx] > 1) {
+    ctx.fillStyle = "rgba(76,194,255,0.18)"; ctx.beginPath(); ctx.roundRect(W / 2 - 110, 36, 220, 40, 10); ctx.fill();
+    ctx.fillStyle = "#4cc2ff"; ctx.font = "800 22px system-ui";
+    ctx.fillText(`⏩ ${WARPS[warpIdx]}× time warp`, W / 2, 64);
+  }
+  if (warpNote && now < warpNote.until) {
+    ctx.fillStyle = "#ffb547"; ctx.font = "700 14px system-ui"; ctx.fillText(warpNote.text, W / 2, 96);
+  } else if (now < viewNote) {
+    ctx.fillStyle = "#c9d1e0"; ctx.font = "700 15px system-ui";
+    ctx.fillText(`View: ${VIEWS[view]}  (A: next view)`, W / 2, 96);
+  }
+
+  if (banner && performance.now() < banner.until) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(10,12,18,0.8)"; ctx.beginPath(); ctx.roundRect(W / 2 - 230, 110, 460, 64, 12); ctx.fill();
+    ctx.fillStyle = "#3ddc84"; ctx.font = "800 20px system-ui"; ctx.fillText(banner.text, W / 2, 138);
+    ctx.fillStyle = "#c9d1e0"; ctx.font = "500 13px system-ui"; ctx.fillText(banner.sub, W / 2, 160);
+  }
+}
+
+function wrapText(text, x, y, maxW, lh) {
+  const words = text.split(" "); let line = "";
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, y); y += lh; line = w; }
+    else line = test;
+  }
+  if (line) ctx.fillText(line, x, y);
+}
+
+function panel(lines) {
+  ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(640, W - 32), bh = lines.reduce((a, l) => a + l[1] + 16, 44), bx = (W - bw) / 2, by = (H - bh) / 2;
+  ctx.fillStyle = "#181b22"; ctx.strokeStyle = "#2a2f3a"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 18); ctx.fill(); ctx.stroke();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  let y = by + 30;
+  for (const [text, size, color, weight] of lines) {
+    y += size / 2; ctx.font = `${weight || 600} ${size}px system-ui, sans-serif`; ctx.fillStyle = color || "#c9d1e0";
+    ctx.fillText(text, W / 2, y, bw - 40); y += size / 2 + 16;
+  }
+  ctx.textBaseline = "alphabetic";
+}
+
+function render(p) {
+  const sit = situation();
+  camera(sit);
+  // Sky: blue low in Terra's air, fading to black in space
+  const airFrac = sit.dom === TERRA && !mapView ? clamp(1 - sit.alt / 45e3, 0, 1) : 0;
+  ctx.fillStyle = `rgb(${Math.round(20 + 50 * airFrac)},${Math.round(30 + 110 * airFrac)},${Math.round(50 + 170 * airFrac)})`;
+  if (airFrac <= 0) ctx.fillStyle = "#020308";
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff";
+  for (const [x, y, r] of stars) { ctx.globalAlpha = (1 - airFrac) * 0.8; ctx.fillRect(x * W, y * H, r, r); }
+  ctx.globalAlpha = 1;
+
+  const [lx, ly] = lunaPos(S.t);
+  // Flight view turns the world so local "up" points up on screen (ground at the bottom)
+  let rotTarget = 0;
+  if (!mapView) {
+    const [bx, by] = sit.dom === LUNA ? [lx, ly] : [0, 0];
+    rotTarget = Math.atan2(S.y - by, S.x - bx) - Math.PI / 2;
+  }
+  cam.rot = cam.rot === undefined ? rotTarget : cam.rot + wrap(rotTarget - cam.rot) * 0.15;
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.rotate(cam.rot); ctx.translate(-W / 2, -H / 2);
+  if (mapView || cam.k < 1e-3) {
+    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(SX(0), SY(0), LUNA.a * cam.k, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.setLineDash([3, 6]);
+    ctx.beginPath(); ctx.arc(SX(lx), SY(ly), LUNA.soi * cam.k, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+  }
+  drawBody(TERRA, 0, 0);
+  drawBody(LUNA, lx, ly);
+  drawPath(sit);
+  for (const d of debris) drawRocket(d.x, d.y, d.th, Math.max(14, 30 * cam.k), 0.6, 0);
+  for (const q of parts) { ctx.fillStyle = q.c; ctx.globalAlpha = clamp(q.life, 0, 1); ctx.fillRect(SX(q.x) - 2, SY(q.y) - 2, 4, 4); }
+  ctx.globalAlpha = 1;
+  if (state !== "crashed") {
+    const size = mapView ? 22 : Math.max(26, 30 * cam.k);
+    drawRocket(S.x, S.y, S.th, size, 1, S.stage, S.thr);
+    if (assist && state === "play") {
+      // Dashed line where the assist is steering the nose
+      const sx = SX(S.x), sy = SY(S.y), len = size * 2.2;
+      ctx.strokeStyle = "rgba(255,181,71,0.85)"; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + Math.cos(S.target) * len, sy - Math.sin(S.target) * len); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.fillStyle = "#c9d1e0"; ctx.font = "700 12px system-ui"; ctx.textAlign = "center";
+  if (mapView || cam.k < 1e-3) {
+    ctx.fillText("Terra", SX(0), SY(0) + Math.max(TERRA.R * cam.k, 4) + 16);
+    ctx.fillText("Luna", SX(lx), SY(ly) + Math.max(LUNA.R * cam.k, 4) + 16);
+  }
+  ctx.restore();
+
+  if (state === "title") {
+    panel([
+      ["ORBIT MISSION", 44, "#4cc2ff", 900],
+      ["Fly from Terra to Luna with real orbital mechanics.", 17],
+      ["Launch → orbit → transfer → capture → lunar orbit → landing. Each step is a checkpoint.", 15],
+      ["Time warp (LB/RB) only speeds up game time: the physics stays exact.", 14, "#8a92a3"],
+      [hasSaved() ? "A: continue from checkpoint · X: new mission" : "Press A to start", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
+      [`Y: landing practice · B: hub · Unlimited fuel ${infFuel ? "ON" : "OFF"} (B while flying)`, 13, "#5c6475"],
+    ]);
+    return;
+  }
+  drawHUD(sit);
+  if (state === "crashed") {
+    panel([
+      ["Mission lost", 36, "#ff6b5c", 900],
+      [S.crashed, 15],
+      [`Checkpoint: ${PHASES[Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1)].name}`, 15, "#8a92a3"],
+      ["A: load checkpoint · Start: menu", 18, "#3ddc84", 700],
+    ]);
+  } else if (state === "complete") {
+    panel([
+      ["Mission complete!", 38, "#3ddc84", 900],
+      [`Landed on Luna at ${S.touch.down.toFixed(2)} m/s after ${fmtTime(S.t)}`, 16],
+      [infFuel ? "Unlimited fuel (no fuel bonus)" : `Δv left ${Math.round(deltaV(S))} m/s`, 15, "#8a92a3"],
+      [`Score ${S.score}`, 26, "#ffb547", 800],
+      ["A: fly again · B: hub", 18, "#3ddc84", 700],
+    ]);
+  } else if (state === "pause") {
+    // the Pad menu is drawn on top
+  }
+}
+
+// ---------- main loop ----------
+Pad.setup({
+  title: "Orbit Mission",
+  hubUrl: "../../",
+  items: [
+    { label: "Resume", action: () => {} },
+    { label: "Load last checkpoint", action: () => { if (loadCheckpoint()) state = "play"; } },
+    { label: "Restart mission", action: () => { newMission(); state = "play"; } },
+    { get label() { return `Unlimited fuel: ${infFuel ? "ON" : "OFF"}`; }, keepOpen: true, action: toggleFuel },
+    { label: "Tune attitude assist (PID)", action: () => { assist = true; Assist.open(); } },
+    { label: "Landing practice", action: () => { location.href = "./"; } },
+  ],
+  canOpen: () => !Assist.isOpen(),
+  onMenu: open => {
+    if (open && state === "play") state = "pause";
+    else if (!open && state === "pause") state = "play";
+  },
+});
+
+newMission(false);
+try { const cp = JSON.parse(localStorage.getItem(KEY) || "null"); if (cp) checkpoint = cp; } catch (e) {}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  let p = Pad.poll();
+  if (Assist.isOpen()) { Assist.handle(p); p = { ...p, pressed: [] }; }
+  if (p.connected && state !== "pause") {
+    if (state === "title") {
+      if (p.pressed[B.A]) { if (!(hasSaved() && loadCheckpoint())) newMission(); state = "play"; }
+      else if (p.pressed[B.X]) { newMission(); state = "play"; }
+      else if (p.pressed[B.Y]) location.href = "./";
+      else if (p.pressed[B.B]) location.href = "../../";
+    } else if (state === "crashed") {
+      if (p.pressed[B.A]) { loadCheckpoint(); state = "play"; }
+    } else if (state === "complete") {
+      if (p.pressed[B.A]) { newMission(); state = "play"; }
+      else if (p.pressed[B.B]) location.href = "../../";
+    } else if (state === "play") update(dt, p);
+  }
+  if (state === "crashed") for (const q of parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt; }
+  render(p);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

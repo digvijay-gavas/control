@@ -26,8 +26,8 @@ window.GAMES = [
     path: "games/gravity-lander/",
     icon: "🚀",
     color: "#ffb547",
-    description: "Land softly on the Moon, Mars, Titan and Earth with real gravity, air drag and rocket physics.",
-    tags: ["Real physics", "RT throttle", "Skill"],
+    description: "Real rocket physics. Land on the Moon, Mars, Titan and Earth, or fly a full orbit mission from Terra to Luna with time warp and checkpoints. Tunable PID attitude assist.",
+    tags: ["Real physics", "Orbit mission", "PID assist"],
   },
   {
     id: "turbo-laps",

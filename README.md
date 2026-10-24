@@ -25,7 +25,7 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 ## Controls everywhere
 
 - **Hub:** D-pad / left stick chooses a card, **A** opens it.
-- **In a game:** **Start** or **Back** opens the menu (Resume, Restart, Back to hub). Move through it with the D-pad or stick, **A** selects, **B** closes it.
+- **In a game:** **Start** or **Back** opens the menu (Resume, Restart, Back to hub). Move through it with the D-pad, stick or keyboard arrow keys; **A** (or Enter) selects, **B** (or Esc) closes it.
 - **On a game's title or game-over screen:** **B** goes back to the hub.
 - **Tester:** **hold** Start or Back for about a second to open its menu. A short press only lights up the button, so Start and Back can still be tested.
 
@@ -67,5 +67,21 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 |---|---|
 | [Trigger Storm](games/trigger-storm/) | Twin-stick shooter: RT pressure sets fire rate, LT pressure sets shield size, every button has a job. |
 | [Fruit Catch](games/fruit-catch/) | Easy and relaxed: move a basket to catch fruit, stars and hearts, and dodge bombs. Left stick or D-pad, RT for a speed boost. |
-| [Gravity Lander](games/gravity-lander/) | Real physics: land on the Moon, Mars, Titan and Earth using each world's real gravity and air density. Thrust follows the craft's tilt, fuel mass burns off by the rocket equation, and spin has inertia. RT throttle, stick to rotate, LT auto-level. |
+| [Gravity Lander](games/gravity-lander/) | Real physics: land on the Moon, Mars, Titan and Earth using each world's real gravity and air density. Thrust follows the craft's tilt, fuel mass burns off by the rocket equation, and spin has inertia. RT throttle, stick sets the tilt, X toggles the PID attitude assist. |
+| [Orbit Mission](games/gravity-lander/mission.html) | Part of Gravity Lander (Y on its title screen). Six assignments from launch pad to a Luna landing: lift off, reach orbit, transfer, get captured, stable lunar orbit, land. Each one saves a checkpoint. See below. |
+
+### Orbit Mission physics
+
+- **Gravity:** Newton's gravity from Terra and Luna at the same time, with Luna on a fixed circular orbit. Planets are scaled down, like Kerbal Space Program: Terra is 600 km in radius with 9.81 m/s² surface gravity, Luna is 200 km with 1.63 m/s², 12,000 km away.
+- **Rocket:** two stages (Y separates them). Mass falls as fuel burns, following the rocket equation. Δv left is shown live.
+- **Atmosphere:** drag in Terra's air, which thins out exponentially up to 70 km.
+- **Time warp:** RB faster, LB slower, from 1× to 10,000×. It only makes game time pass faster; the integrator takes smaller steps, so orbits stay exact. Warp is limited to 4× while the engine burns or in the air and 10× near the ground (a message says why), and drops when you enter a new sphere of influence.
+- **Views:** A cycles Rocket → Orbit map (around the body you're near) → Terra–Luna system. The right stick zooms, R3 resets the zoom.
+- **Steering:** with the assist on, point the left stick where the nose should face on screen (stick up = nose up). Let go and the assist keeps that heading. A panel at the bottom left shows whether the assist is on and what it's holding.
+- **Unlimited fuel:** a practice switch: **B** while flying, or the Start menu. Shared with landing mode. Tanks never drain; mass and thrust are unchanged, and there's no fuel bonus in the score.
+- **Steering aids:** a predicted path (including the Luna encounter), apoapsis and periapsis markers, the Luna phase angle, and D-pad holds for prograde, retrograde and radial.
+
+### Attitude assist (PID)
+
+`games/gravity-lander/assist.js` holds the craft at the angle the pilot asks for, using only the real rotation thrusters' strength. Tune Kp, Ki and Kd live from the Start menu ("Tune attitude assist"). A chart shows target vs actual angle, and a hint gives the critical-damping Kd (2·√Kp). The values are saved in the browser.
 | [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro. Best lap is saved. |
