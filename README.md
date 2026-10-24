@@ -20,6 +20,8 @@ python -m http.server 8765 --bind 127.0.0.1
 
 Then open http://localhost:8765 and press any button on the controller.
 
+On Windows you can double-click **`start.bat`** instead: it starts the server in a minimized window and opens the hub in your browser. **`stop.bat`** stops the server. Both need Python on the PATH.
+
 If the controller isn't detected, open the tester. If it shows nothing either, check that Windows sees the controller. Its USB receiver may need to go straight into a laptop port, not a hub.
 
 ## Controls everywhere
@@ -85,4 +87,4 @@ If the controller isn't detected, open the tester. If it shows nothing either, c
 ### Attitude assist (PID)
 
 `games/gravity-lander/assist.js` holds the craft at the angle the pilot asks for, using only the real rotation thrusters' strength. Tune Kp, Ki and Kd live from the Start menu ("Tune attitude assist"). A chart shows target vs actual angle, and a hint gives the critical-damping Kd (2·√Kp). The values are saved in the browser.
-| [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro. Best lap is saved. |
+| [Turbo Laps](games/turbo-laps/) | Top-down racing, 3 laps against 3 AI cars. RT gas, LT brake/reverse, stick steer, A handbrake drift, X nitro, Y camera. The default chase camera turns with the car (nose always up, with a little lag), so stick left always looks like turning left; Y switches to a fixed map. Best lap is saved. |

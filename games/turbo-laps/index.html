@@ -22,6 +22,7 @@
 //   Left stick  steer (analog)
 //   A           handbrake: rear grip drops so the car drifts
 //   X           nitro (hold; the bar refills slowly)
+//   Y           camera: chase (turns with the car, nose always up) / fixed map
 //   Start/Back  menu · B on title or results returns to the hub
 // Grass and gravel slow you down; the tyre wall stops you.
 
@@ -265,7 +266,19 @@ function update(dt, p) {
 }
 
 // ---------- render ----------
-let camX = 0, camY = 0, camZ = 1;
+let camX = 0, camY = 0, camZ = 1, camRot = 0;
+// Chase camera: the world turns so the car's nose points up, so stick left
+// always looks like turning left. It trails the car's heading a little, so
+// turns and drifts still show as the car swinging before the view catches up.
+const CAM_KEY = "turbo-laps-camera";
+let chaseCam = true;
+try { chaseCam = localStorage.getItem(CAM_KEY) !== "fixed"; } catch (e) {}
+let camNote = 0;
+function toggleCam() {
+  chaseCam = !chaseCam; camNote = performance.now() + 1800;
+  try { localStorage.setItem(CAM_KEY, chaseCam ? "chase" : "fixed"); } catch (e) {}
+  Pad.setup({});
+}
 function fmt(t) {
   if (!t) return "--:--.--";
   const m = Math.floor(t / 60), s = t - m * 60;
@@ -300,14 +313,24 @@ function drawWorld() {
   const speed = Math.hypot(player.vx, player.vy);
   const zt = clamp(H / 820, 0.65, 1.5) * (1 - clamp(speed / 640, 0, 1) * 0.18);
   camZ += (zt - camZ) * 0.05;
-  const tx = player.x + player.vx * 0.35, ty = player.y + player.vy * 0.35;
+  const fx = Math.cos(player.h), fy = Math.sin(player.h);
+  let tx, ty;
+  if (chaseCam) {
+    // Look ahead along the nose so the car sits in the lower part of the screen
+    const ahead = H * 0.2 / camZ + speed * 0.12;
+    tx = player.x + fx * ahead; ty = player.y + fy * ahead;
+  } else { tx = player.x + player.vx * 0.35; ty = player.y + player.vy * 0.35; }
   camX += (tx - camX) * 0.12; camY += (ty - camY) * 0.12;
+  // Nose up on screen: rotate the world by -(heading + 90°). The lag gives the view momentum.
+  const rotTarget = chaseCam ? -player.h - Math.PI / 2 : 0;
+  camRot += wrapAngle(rotTarget - camRot) * (chaseCam ? 0.09 : 0.15);
 
   ctx.fillStyle = "#3f8f3a"; ctx.fillRect(0, 0, W, H);
   ctx.save();
-  ctx.translate(W / 2, H / 2); ctx.scale(camZ, camZ); ctx.translate(-camX, -camY);
-  const vw = W / camZ / 2 + 150, vh = H / camZ / 2 + 150;
-  const inView = (x, y) => Math.abs(x - camX) < vw && Math.abs(y - camY) < vh;
+  ctx.translate(W / 2, H / 2); ctx.rotate(camRot); ctx.scale(camZ, camZ); ctx.translate(-camX, -camY);
+  // Round visibility test, since the view can be turned any way
+  const vr = Math.hypot(W, H) / camZ / 2 + 150;
+  const inView = (x, y) => Math.hypot(x - camX, y - camY) < vr;
 
   for (const pt of patches) if (inView(pt.x, pt.y)) {
     ctx.fillStyle = pt.d ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.05)";
@@ -392,7 +415,11 @@ function drawHUD() {
   ctx.fillStyle = "rgba(255,255,255,0.8)"; ctx.font = "600 11px system-ui, sans-serif"; ctx.textAlign = "left";
   ctx.fillText("NITRO (X)", W - 220, H - 34);
   ctx.textAlign = "left"; ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.font = "600 12px system-ui, sans-serif";
-  ctx.fillText("RT gas · LT brake · Stick steer · A drift · X nitro · Start menu", 16, H - 16);
+  ctx.fillText(`RT gas · LT brake · Stick steer · A drift · X nitro · Y camera (${chaseCam ? "chase" : "fixed"}) · Start menu`, 16, H - 16);
+  if (performance.now() < camNote) {
+    ctx.textAlign = "center"; ctx.fillStyle = "#fff"; ctx.font = "800 18px system-ui, sans-serif";
+    ctx.fillText(chaseCam ? "Camera: chase (turns with the car)" : "Camera: fixed map", W / 2, 110);
+  }
   if (player.off && state === "race") {
     ctx.textAlign = "center"; ctx.fillStyle = "#ffd23f"; ctx.font = "800 18px system-ui, sans-serif";
     ctx.fillText("Off track!", W / 2, H - 70);
@@ -423,6 +450,7 @@ function render(p) {
       [`${LAPS} laps against three AI cars`, 17],
       ["RT gas · LT brake/reverse · Left stick steer", 16],
       ["A handbrake (drift) · X nitro · Start menu", 16],
+      [`Y: camera — ${chaseCam ? "chase (turns with the car)" : "fixed map"}`, 15, "#4cc2ff"],
       [bestLap ? `Your best lap ${fmt(bestLap)}` : "Set a best lap!", 15, "#ffd23f"],
       [p.connected ? "Press A to race" : "Connect a controller and press any button", 22, p.connected ? "#3ddc84" : "#ffb547", 800],
       ["B: back to hub", 13, "#5c6475"],
@@ -460,6 +488,7 @@ Pad.setup({
   items: [
     { label: "Resume", action: () => {} },
     { label: "Restart race", action: () => newRace() },
+    { get label() { return `Camera: ${chaseCam ? "chase (turns with the car)" : "fixed map"}`; }, keepOpen: true, action: toggleCam },
   ],
   onMenu: open => {
     if (open && (state === "race" || state === "countdown")) { pausedFrom = state; state = "pause"; }
@@ -469,12 +498,13 @@ Pad.setup({
 let pausedFrom = "race";
 
 newRace(); state = "title";
-camX = player.x; camY = player.y;
+camX = player.x; camY = player.y; camRot = chaseCam ? -player.h - Math.PI / 2 : 0;
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.033, (now - last) / 1000); last = now;
   const p = Pad.poll();
   if (p.connected && state !== "pause") {
+    if (p.pressed[B.Y]) toggleCam();
     if ((state === "title" || state === "finished") && p.pressed[B.A]) newRace();
     else if ((state === "title" || state === "finished") && p.pressed[B.B]) location.href = "../../";
     else update(dt, p);
