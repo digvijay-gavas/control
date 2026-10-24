@@ -582,6 +582,31 @@ function drawAttitude(sit) {
   const [nx, ny] = P(S.th, r - 4); ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(nx, ny); ctx.stroke();
 }
 
+// Velocity relative to the body you're near, drawn from the rocket. In the
+// Rocket view it's also split into vertical (climb/fall) and horizontal parts.
+function drawVelocityVector(sit) {
+  const rot = cam.rot || 0, c = Math.cos(rot), sn = Math.sin(rot);
+  // world vector -> screen (y down), undoing the camera rotation
+  const scr = (wx, wy) => [wx * c + wy * sn, wx * sn - wy * c];
+  const [px0, py0] = scr((S.x - cam.x) * cam.k, (S.y - cam.y) * cam.k);
+  const px = W / 2 + px0, py = H / 2 + py0;
+  const { vx, vy, rx, ry, r } = sit.el, speed = Math.hypot(vx, vy);
+  const [dx, dy] = speed > 0 ? scr(vx / speed, vy / speed) : [0, -1];
+  let comps = [];
+  if (!mapView && !S.landedOn) {
+    const ux = rx / r, uy = ry / r, vr = vx * ux + vy * uy;          // vertical: along local up
+    const hx = vx - vr * ux, hy = vy - vr * uy, vh = Math.hypot(hx, hy);
+    const [udx, udy] = scr(ux * Math.sign(vr || 1), uy * Math.sign(vr || 1));
+    const [hdx, hdy] = vh > 0 ? scr(hx / vh, hy / vh) : [1, 0];
+    const fmt = v => Math.abs(v) < 100 ? Math.abs(v).toFixed(1) : String(Math.round(Math.abs(v)));
+    comps = [
+      { dx: udx, dy: udy, speed: Math.abs(vr), label: `${vr >= 0 ? "↑ climb" : "↓ fall"} ${fmt(vr)}`, color: vr < -3 && sit.alt < 5e3 ? "#ff6b5c" : "#4cc2ff" },
+      { dx: hdx, dy: hdy, speed: vh, label: `sideways ${fmt(vh)}`, color: "#c9d1e0" },
+    ];
+  }
+  Assist.drawVelocity(ctx, px, py, { dx, dy, speed }, comps);
+}
+
 // Angle as shown on screen: 0° = up, clockwise positive like a compass
 const screenDeg = a => ((Math.round(90 - (a - (cam.rot || 0)) * 180 / Math.PI) % 360) + 360) % 360;
 function drawStatus() {
@@ -764,6 +789,7 @@ function render(p) {
     ctx.fillText("Luna", SX(lx), SY(ly) + Math.max(LUNA.R * cam.k, 4) + 16);
   }
   ctx.restore();
+  if (state === "play" || state === "pause") drawVelocityVector(sit);
 
   if (state === "title") {
     panel([

@@ -446,6 +446,14 @@ function panel(lines) {
 
 function render(p) {
   drawWorld();
+  if (state === "play" || state === "pause") {
+    // Velocity arrow from the craft, split into falling/climbing and sideways
+    const speed = Math.hypot(L.vx, L.vy), fmt = v => Math.abs(v).toFixed(1);
+    Assist.drawVelocity(ctx, sx(L.x), sy(L.y), speed > 0 ? { dx: L.vx / speed, dy: -L.vy / speed, speed } : { dx: 0, dy: -1, speed: 0 }, [
+      { dx: 0, dy: L.vy >= 0 ? -1 : 1, speed: Math.abs(L.vy), label: `${L.vy >= 0 ? "↑ climb" : "↓ fall"} ${fmt(L.vy)}`, color: -L.vy > SAFE_VY ? "#ff6b5c" : "#4cc2ff" },
+      { dx: L.vx >= 0 ? 1 : -1, dy: 0, speed: Math.abs(L.vx), label: `${L.vx >= 0 ? "→" : "←"} ${fmt(L.vx)}`, color: Math.abs(L.vx) > SAFE_VX ? "#ff6b5c" : "#c9d1e0" },
+    ]);
+  }
   if (state === "title") {
     panel([
       ["GRAVITY LANDER", 44, "#4cc2ff", 900],

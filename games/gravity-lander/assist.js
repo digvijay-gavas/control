@@ -211,7 +211,46 @@
     ctx.restore();
   }
 
+  // ---------- velocity vector ----------
+  // Arrow from the craft along its velocity. Length grows with log(speed) so
+  // 1 m/s and 2000 m/s both fit on screen; the label gives the real number.
+  //   (px, py)  craft on screen
+  //   v         { dx, dy, speed }  screen direction (unit, y down) and m/s
+  //   comps     [{ dx, dy, speed, label, color }] optional components (e.g. vertical / horizontal)
+  const arrowLen = s => s < 0.05 ? 0 : Math.min(150, 18 + 30 * Math.log10(1 + s));
+  function arrow(ctx, px, py, dx, dy, len, color, width, dash) {
+    if (len < 2) return [px, py];
+    const ex = px + dx * len, ey = py + dy * len, hx = -dy, hy = dx, hs = 4 + width * 2;
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex - dx * hs * 0.6, ey - dy * hs * 0.6); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - dx * hs * 1.6 + hx * hs * 0.7, ey - dy * hs * 1.6 + hy * hs * 0.7);
+    ctx.lineTo(ex - dx * hs * 1.6 - hx * hs * 0.7, ey - dy * hs * 1.6 - hy * hs * 0.7);
+    ctx.closePath(); ctx.fill();
+    return [ex, ey];
+  }
+  function label(ctx, x, y, dx, dy, text, color, font) {
+    ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const w = ctx.measureText(text).width, lx = x + dx * (w / 2 + 10), ly = y + dy * 14;
+    ctx.fillStyle = "rgba(10,12,18,0.75)"; ctx.beginPath(); ctx.roundRect(lx - w / 2 - 5, ly - 10, w + 10, 20, 6); ctx.fill();
+    ctx.fillStyle = color; ctx.fillText(text, lx, ly);
+  }
+  function drawVelocity(ctx, px, py, v, comps) {
+    ctx.save();
+    for (const c of comps || []) {
+      const [ex, ey] = arrow(ctx, px, py, c.dx, c.dy, arrowLen(c.speed), c.color, 2, [4, 4]);
+      if (c.speed >= 0.05) label(ctx, ex, ey, c.dx, c.dy, c.label, c.color, "700 11px system-ui, sans-serif");
+    }
+    // dark outline under the main arrow so it reads on sky, ground and space
+    arrow(ctx, px, py, v.dx, v.dy, arrowLen(v.speed), "rgba(0,0,0,0.6)", 6);
+    const [ex, ey] = arrow(ctx, px, py, v.dx, v.dy, arrowLen(v.speed), "#3ddc84", 3);
+    label(ctx, ex, ey, v.speed < 0.05 ? 0 : v.dx, v.speed < 0.05 ? -1 : v.dy,
+      v.speed < 0.05 ? "0 m/s" : `${v.speed < 100 ? v.speed.toFixed(1) : Math.round(v.speed)} m/s`, "#3ddc84", "800 13px system-ui, sans-serif");
+    ctx.restore();
+  }
+
   if (document.body) build(); else document.addEventListener("DOMContentLoaded", build);
 
-  window.Assist = { pid, gains, record, open, close, isOpen: () => openFlag, handle, drawStatus, DEFAULTS };
+  window.Assist = { pid, gains, record, open, close, isOpen: () => openFlag, handle, drawStatus, drawVelocity, DEFAULTS };
 })();
