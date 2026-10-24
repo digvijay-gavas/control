@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gamepad Visualizer</title>
+<title>Controller Tester</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e6e8ee; --muted: #8a92a3;
@@ -114,27 +114,44 @@
   </section>
 </template>
 
+<script src="../shared/pad.js"></script>
 <script>
 // Labels for the W3C "standard" mapping; other controllers fall back to indices.
 const STD_NAMES = ["A","B","X","Y","LB","RB","LT","RT","Back","Start","LS","RS","Up","Down","Left","Right","Home"];
 const AXIS_NAMES = ["LX","LY","RX","RY"];
 const TRAIL_LEN = 60;
 const views = new Map();
+let noteUntil = 0;
 
 const $status = document.getElementById("status");
 const $pads = document.getElementById("pads");
 const $empty = document.getElementById("empty");
 
-function stopAllRumble() {
-  for (const g of navigator.getGamepads()) {
-    if (g && g.vibrationActuator && g.vibrationActuator.reset) g.vibrationActuator.reset().catch(() => {});
-  }
+function testVibration() {
+  const p = Pad.poll();
+  const act = p.gp && p.gp.vibrationActuator;
+  if (act && act.playEffect) Pad.rumble(1, 1, 600);
+  else { $status.textContent = "This controller or browser does not support vibration."; noteUntil = performance.now() + 3000; }
 }
-window.addEventListener("pagehide", stopAllRumble);
+function clearTrails() {
+  views.forEach(v => v.sticks.forEach(s => { s.pts = []; s.trail.setAttribute("d", ""); }));
+}
+
+// Start and Back must stay testable here, so the menu opens on a long hold.
+Pad.setup({
+  title: "Controller Tester",
+  hubUrl: "../",
+  holdToOpen: true,
+  items: [
+    { label: "Test vibration", action: testVibration, keepOpen: true },
+    { label: "Stop vibration", action: Pad.stopRumble, keepOpen: true },
+    { label: "Clear stick trails", action: clearTrails },
+  ],
+});
 
 function createView(gp) {
   // Clear any vibration left running by a previous page.
-  stopAllRumble();
+  Pad.stopRumble();
   const node = document.getElementById("pad-tpl").content.firstElementChild.cloneNode(true);
   const std = gp.mapping === "standard";
   node.querySelector(".name").textContent = `#${gp.index} ${gp.id}`;
@@ -169,19 +186,9 @@ function createView(gp) {
     })),
   };
 
-  node.querySelector('[data-act="rumble"]').onclick = () => {
-    const g = navigator.getGamepads()[gp.index];
-    const act = g && g.vibrationActuator;
-    if (act && act.playEffect) {
-      act.playEffect("dual-rumble", { duration: 600, strongMagnitude: 1, weakMagnitude: 1 }).catch(() => {});
-      // Explicit stop afterwards: some Xbox 360 receivers miss the end of an effect.
-      setTimeout(stopAllRumble, 650);
-    } else {
-      alert("This controller or browser does not support vibration.");
-    }
-  };
-  node.querySelector('[data-act="stop"]').onclick = stopAllRumble;
-  node.querySelector('[data-act="clear"]').onclick = () => view.sticks.forEach(s => { s.pts = []; s.trail.setAttribute("d", ""); });
+  node.querySelector('[data-act="rumble"]').onclick = testVibration;
+  node.querySelector('[data-act="stop"]').onclick = Pad.stopRumble;
+  node.querySelector('[data-act="clear"]').onclick = clearTrails;
 
   $pads.appendChild(node);
   return view;
@@ -232,6 +239,7 @@ function update(view, gp) {
 }
 
 function loop() {
+  Pad.poll();
   const pads = [...navigator.getGamepads()].filter(Boolean);
   const seen = new Set();
   for (const gp of pads) {
@@ -244,9 +252,11 @@ function loop() {
     if (!seen.has(idx)) { view.node.remove(); views.delete(idx); }
   }
   $empty.style.display = pads.length ? "none" : "";
-  $status.textContent = pads.length
-    ? `${pads.length} controller${pads.length > 1 ? "s" : ""} connected`
-    : "Waiting for a controller. Press any button on it.";
+  if (performance.now() > noteUntil) {
+    $status.textContent = pads.length
+      ? `${pads.length} controller${pads.length > 1 ? "s" : ""} connected · hold Start or Back for the menu`
+      : "Waiting for a controller. Press any button on it.";
+  }
   requestAnimationFrame(loop);
 }
 

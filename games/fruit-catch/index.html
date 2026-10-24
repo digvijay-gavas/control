@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fruit Catch</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #bfe6ff; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hub { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); color: #4a6b85; font: 600 12px system-ui, sans-serif; text-decoration: none; }
+  #hub:hover { color: #1d4a6b; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<a id="hub" href="../../">← Hub</a>
+<script src="../../shared/pad.js"></script>
+<script>
+// Fruit Catch: a relaxed catching game.
+//   Left stick or D-pad  move the basket (stick is analog: push further, go faster)
+//   A                    start / play again
+//   Start or Back        menu (resume, restart, back to hub)
+//   B on the title or game-over screen returns to the hub
+// Missing fruit only resets the streak; bombs cost a heart.
+
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const B = Pad.BTN;
+const FRUITS = [
+  { e: "🍎", pts: 10 }, { e: "🍊", pts: 10 }, { e: "🍌", pts: 10 }, { e: "🍇", pts: 15 },
+  { e: "🍓", pts: 15 }, { e: "🍉", pts: 20 }, { e: "🍒", pts: 20 }, { e: "🍍", pts: 25 },
+];
+const MAX_LIVES = 5;
+
+let state = "title";
+let basket, items, pops, clouds, score, best, lives, streak, level, spawnT, levelText, wobble;
+
+function loadBest() { try { return +localStorage.getItem("fruit-catch-best") || 0; } catch (e) { return 0; } }
+function saveBest(v) { try { localStorage.setItem("fruit-catch-best", String(v)); } catch (e) {} }
+best = loadBest();
+
+clouds = Array.from({ length: 6 }, () => ({ x: Math.random() * 1.2, y: Math.random() * 0.4, s: 0.6 + Math.random() * 0.8, v: 0.004 + Math.random() * 0.01 }));
+
+function reset() {
+  basket = { x: W / 2, w: 130, vx: 0, squish: 0 };
+  items = []; pops = [];
+  score = 0; lives = 3; streak = 0; level = 1; spawnT = 0.6; levelText = 0; wobble = 0;
+}
+reset();
+
+Pad.setup({
+  title: "Fruit Catch",
+  hubUrl: "../../",
+  items: [
+    { label: "Resume", action: () => {} },
+    { label: "Restart", action: () => { reset(); state = "play"; } },
+  ],
+  onMenu: open => {
+    if (open && state === "play") state = "pause";
+    else if (!open && state === "pause") state = "play";
+  },
+});
+
+// ---------- spawning ----------
+function spawn() {
+  const r = Math.random();
+  const bombChance = Math.min(0.32, 0.08 + level * 0.025);
+  let kind, emoji, pts = 0;
+  if (r < bombChance) { kind = "bomb"; emoji = "💣"; }
+  else if (r < bombChance + 0.03) { kind = "star"; emoji = "⭐"; pts = 50; }
+  else if (r < bombChance + 0.05 && lives < MAX_LIVES) { kind = "heart"; emoji = "💖"; }
+  else { const f = FRUITS[Math.floor(Math.random() * FRUITS.length)]; kind = "fruit"; emoji = f.e; pts = f.pts; }
+  items.push({
+    kind, emoji, pts,
+    x: 40 + Math.random() * (W - 80), y: -40,
+    vy: 140 + level * 22 + Math.random() * 40,
+    sway: Math.random() * Math.PI * 2, swayAmp: kind === "bomb" ? 0 : 10 + Math.random() * 14,
+    rot: (Math.random() - 0.5) * 0.6, spin: (Math.random() - 0.5) * 2,
+  });
+}
+
+function pop(x, y, text, color, emoji) {
+  pops.push({ x, y, text, color, t: 0 });
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * Math.PI * 2, s = 80 + Math.random() * 140;
+    pops.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, spark: emoji || "✨", t: 0 });
+  }
+}
+
+// ---------- update ----------
+function update(dt, p) {
+  if (state !== "play") return;
+  const groundY = H - 70;
+
+  // Movement: stick is analog, D-pad is full speed
+  let dir = p.lx;
+  if (p.down[B.LEFT]) dir = -1;
+  if (p.down[B.RIGHT]) dir = 1;
+  const target = dir * (650 + level * 25);
+  basket.vx += (target - basket.vx) * Math.min(1, dt * 14);
+  basket.x = Math.max(basket.w / 2, Math.min(W - basket.w / 2, basket.x + basket.vx * dt));
+  basket.squish = Math.max(0, basket.squish - dt * 4);
+
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    spawn();
+    spawnT = Math.max(0.35, 1.1 - level * 0.07) * (0.6 + Math.random() * 0.7);
+  }
+
+  const catchY = groundY - 40;
+  for (const it of items) {
+    it.y += it.vy * dt;
+    it.sway += dt * 2;
+    it.rot += it.spin * dt;
+    const x = it.x + Math.sin(it.sway) * it.swayAmp;
+
+    if (!it.done && it.y > catchY - 10 && it.y < catchY + 25 && Math.abs(x - basket.x) < basket.w / 2 + 6) {
+      it.done = true;
+      basket.squish = 1;
+      if (it.kind === "bomb") {
+        lives--; streak = 0; wobble = 1;
+        pop(x, catchY, "Oops!", "#e5484d", "💥");
+        Pad.rumble(0.8, 0.5, 250);
+        if (lives <= 0) {
+          state = "over";
+          if (score > best) { best = score; saveBest(best); }
+        }
+      } else if (it.kind === "heart") {
+        lives = Math.min(MAX_LIVES, lives + 1);
+        pop(x, catchY, "+1 ❤", "#e5487a", "💖");
+        Pad.rumble(0, 0.3, 120);
+      } else {
+        streak++;
+        const mult = Math.min(5, 1 + Math.floor(streak / 5));
+        const gained = it.pts * mult;
+        score += gained;
+        pop(x, catchY, `+${gained}`, it.kind === "star" ? "#f5a524" : "#2f9e44", it.kind === "star" ? "✨" : "•");
+        Pad.rumble(0, it.kind === "star" ? 0.5 : 0.15, it.kind === "star" ? 150 : 60);
+        const newLevel = 1 + Math.floor(score / 200);
+        if (newLevel > level) { level = newLevel; levelText = 2; }
+      }
+    } else if (!it.done && it.y > groundY + 10) {
+      it.done = true;
+      if (it.kind === "fruit" || it.kind === "star") streak = 0;
+    }
+  }
+  items = items.filter(it => !it.done);
+
+  for (const q of pops) {
+    q.t += dt;
+    if (q.vx !== undefined) { q.x += q.vx * dt; q.y += q.vy * dt; q.vy += 400 * dt; }
+    else q.y -= 40 * dt;
+  }
+  pops = pops.filter(q => q.t < (q.vx !== undefined ? 0.6 : 0.9));
+  levelText = Math.max(0, levelText - dt);
+  wobble = Math.max(0, wobble - dt * 3);
+}
+
+// ---------- render ----------
+function drawBackground(dt) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#8fd3ff"); g.addColorStop(1, "#e8f7ff");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // sun
+  ctx.fillStyle = "#ffe58a";
+  ctx.beginPath(); ctx.arc(W - 110, 110, 54, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  for (const c of clouds) {
+    c.x += c.v * dt; if (c.x > 1.2) c.x = -0.2;
+    const x = c.x * W, y = 60 + c.y * H * 0.5, s = c.s * 40;
+    ctx.beginPath();
+    ctx.arc(x, y, s, 0, Math.PI * 2); ctx.arc(x + s, y + 6, s * 0.8, 0, Math.PI * 2); ctx.arc(x - s, y + 8, s * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // grass
+  const groundY = H - 70;
+  ctx.fillStyle = "#7ccf5b"; ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = "#68b94a";
+  for (let x = 0; x < W; x += 18) { ctx.beginPath(); ctx.moveTo(x, groundY); ctx.lineTo(x + 9, groundY - 10); ctx.lineTo(x + 18, groundY); ctx.fill(); }
+}
+
+function drawBasket() {
+  const groundY = H - 70, y = groundY - 40;
+  const sq = basket.squish, w = basket.w * (1 + sq * 0.08), h = 46 * (1 - sq * 0.12);
+  const shake = wobble * Math.sin(performance.now() / 30) * 8;
+  ctx.save(); ctx.translate(basket.x + shake, y);
+  // shadow
+  ctx.fillStyle = "rgba(0,0,0,0.12)";
+  ctx.beginPath(); ctx.ellipse(0, 40, w * 0.5, 8, 0, 0, Math.PI * 2); ctx.fill();
+  // body
+  ctx.fillStyle = "#c98a4b"; ctx.strokeStyle = "#8f5a2a"; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0); ctx.lineTo(w / 2 - 14, h); ctx.lineTo(-w / 2 + 14, h); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // weave
+  ctx.strokeStyle = "rgba(143,90,42,0.6)"; ctx.lineWidth = 2;
+  for (let i = 1; i < 3; i++) { const yy = h * i / 3; ctx.beginPath(); ctx.moveTo(-w / 2 + 14 * yy / h, yy); ctx.lineTo(w / 2 - 14 * yy / h, yy); ctx.stroke(); }
+  for (let x = -w / 2 + 16; x < w / 2 - 10; x += 16) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x * 0.85, h); ctx.stroke(); }
+  // rim
+  ctx.fillStyle = "#a86d36";
+  ctx.beginPath(); ctx.roundRect(-w / 2 - 6, -7, w + 12, 12, 6); ctx.fill();
+  ctx.restore();
+}
+
+function drawItems() {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "44px 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', sans-serif";
+  for (const it of items) {
+    const x = it.x + Math.sin(it.sway) * it.swayAmp;
+    ctx.save(); ctx.translate(x, it.y); ctx.rotate(it.rot);
+    if (it.kind === "star") { ctx.shadowColor = "#ffd23f"; ctx.shadowBlur = 20; }
+    ctx.fillText(it.emoji, 0, 0);
+    ctx.restore();
+  }
+  for (const q of pops) {
+    if (q.vx !== undefined) {
+      ctx.globalAlpha = 1 - q.t / 0.6;
+      ctx.font = "16px 'Segoe UI Emoji', sans-serif";
+      ctx.fillText(q.spark, q.x, q.y);
+    } else {
+      ctx.globalAlpha = 1 - q.t / 0.9;
+      ctx.font = "800 26px system-ui, sans-serif";
+      ctx.fillStyle = q.color; ctx.strokeStyle = "#fff"; ctx.lineWidth = 5;
+      ctx.strokeText(q.text, q.x, q.y - 30); ctx.fillText(q.text, q.x, q.y - 30);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left"; ctx.fillStyle = "#1d3b53";
+  ctx.font = "800 34px system-ui, sans-serif";
+  ctx.fillText(score.toLocaleString(), 24, 52);
+  ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#3f6580";
+  const mult = Math.min(5, 1 + Math.floor(streak / 5));
+  ctx.fillText(`Best ${best.toLocaleString()}  ·  Streak ${streak}${mult > 1 ? `  (×${mult})` : ""}  ·  Level ${level}`, 24, 76);
+
+  ctx.font = "28px 'Segoe UI Emoji', sans-serif";
+  for (let i = 0; i < MAX_LIVES; i++) {
+    ctx.globalAlpha = i < lives ? 1 : 0.2;
+    ctx.fillText("❤️", 24 + i * 34, 118);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = "right"; ctx.font = "600 13px system-ui, sans-serif"; ctx.fillStyle = "#3f6580";
+  ctx.fillText("Start: menu", W - 20, H - 24);
+
+  if (levelText > 0) {
+    ctx.textAlign = "center"; ctx.globalAlpha = Math.min(1, levelText);
+    ctx.font = "900 44px system-ui, sans-serif"; ctx.fillStyle = "#f5a524"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 8;
+    ctx.strokeText(`Level ${level}!`, W / 2, H * 0.35); ctx.fillText(`Level ${level}!`, W / 2, H * 0.35);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function panel(lines) {
+  ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(520, W - 32), bh = lines.length * 46 + 50, bx = (W - bw) / 2, by = (H - bh) / 2;
+  ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#cfe3f2"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 22); ctx.fill(); ctx.stroke();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  let y = by + 48;
+  for (const [text, size, color, weight] of lines) {
+    ctx.font = `${weight || 600} ${size}px system-ui, 'Segoe UI Emoji', sans-serif`;
+    ctx.fillStyle = color || "#3f6580";
+    ctx.fillText(text, W / 2, y);
+    y += 46;
+  }
+  ctx.textBaseline = "alphabetic";
+}
+
+function render(dt, p) {
+  drawBackground(dt);
+  if (state !== "title") { drawItems(); drawBasket(); drawHUD(); }
+  if (state === "title") {
+    drawBasket();
+    panel([
+      ["🍎 Fruit Catch 🍌", 40, "#e5484d", 900],
+      ["Move the basket with the left stick or D-pad", 17],
+      ["Catch fruit · ⭐ = bonus · 💖 = extra life · avoid 💣", 17],
+      [p.connected ? "Press A to start" : "Connect a controller and press any button", 22, p.connected ? "#2f9e44" : "#f08c00", 800],
+      ["B: back to hub · Start: menu", 14, "#8aa4b8"],
+    ]);
+  } else if (state === "over") {
+    panel([
+      ["Game over", 40, "#1d3b53", 900],
+      [`Score ${score.toLocaleString()}`, 26, "#2f9e44", 800],
+      [score >= best && score > 0 ? "🎉 New best score! 🎉" : `Best ${best.toLocaleString()}`, 18, "#f5a524", 700],
+      ["Press A to play again", 22, "#2f9e44", 800],
+      ["B: back to hub", 14, "#8aa4b8"],
+    ]);
+  }
+}
+
+// ---------- main loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const p = Pad.poll();
+  if (p.connected && state !== "pause") {
+    if ((state === "title" || state === "over") && p.pressed[B.A]) { reset(); state = "play"; }
+    else if ((state === "title" || state === "over") && p.pressed[B.B]) { location.href = "../../"; }
+    else update(dt, p);
+  }
+  render(state === "pause" ? 0 : dt, p);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

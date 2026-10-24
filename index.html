@@ -40,6 +40,7 @@
       radial-gradient(circle at 75% 70%, color-mix(in srgb, var(--c) 30%, transparent), transparent 50%),
       #12151b; }
   .art svg { position: absolute; right: 16px; bottom: 12px; width: 56px; height: 56px; opacity: .9; }
+  .art .emoji { position: absolute; right: 16px; bottom: 8px; font-size: 54px; line-height: 1; }
   .body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
   .body h3 { margin: 0; font-size: 18px; }
   .body p { margin: 0; color: var(--muted); font-size: 14px; flex: 1; }
@@ -81,12 +82,12 @@
   <div class="grid" id="games"></div>
 </main>
 
-<footer>Controller: <kbd>D-pad</kbd> or <kbd>Left stick</kbd> to choose, <kbd>A</kbd> to open. In a game, pause and press <kbd>B</kbd> to come back here.</footer>
+<footer>Controller: <kbd>D-pad</kbd> or <kbd>Left stick</kbd> to choose, <kbd>A</kbd> to open. In a game, <kbd>Start</kbd> or <kbd>Back</kbd> opens the menu (in the tester, hold it).</footer>
 
 <script src="games.js"></script>
 <script>
 const ICON_TESTER = '<svg viewBox="0 0 64 64" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M18 20h28c8 0 13 8 14 18s-3 14-7 14c-4 0-6-6-10-8H21c-4 2-6 8-10 8s-8-4-7-14 6-18 14-18z"/><path d="M20 30v8M16 34h8"/><circle cx="44" cy="31" r="2" fill="#fff"/><circle cx="49" cy="36" r="2" fill="#fff"/></svg>';
-const ICON_GAME = '<svg viewBox="0 0 64 64" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"><path d="M32 8l22 40H10z"/><path d="M32 26v10M32 42v1"/></svg>';
+const gameIcon = g => `<span class="emoji">${g.icon || "🎮"}</span>`;
 
 function card({ title, description, path, color, tags = [] }, icon) {
   const a = document.createElement("a");
@@ -110,7 +111,7 @@ document.getElementById("tools").appendChild(card({
 }, ICON_TESTER));
 
 const gamesEl = document.getElementById("games");
-(window.GAMES || []).forEach(g => gamesEl.appendChild(card(g, ICON_GAME)));
+(window.GAMES || []).forEach(g => gamesEl.appendChild(card(g, gameIcon(g))));
 const soon = card({ title: "More games coming", description: "New games will appear here.", path: "#", color: "#2a2f3a" }, "");
 soon.classList.add("soon");
 soon.tabIndex = -1;
