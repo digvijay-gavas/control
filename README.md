@@ -20,7 +20,16 @@ python -m http.server 8765 --bind 127.0.0.1
 
 Then open http://localhost:8765 and press any button on the controller.
 
-On Windows you can double-click **`start.bat`** instead: it starts the server in a minimized window and opens the hub in your browser. **`stop.bat`** stops the server. Both need Python on the PATH.
+On Windows, just double-click **`start.bat`**. It works on a fresh machine:
+
+1. If the hub is already running, it just opens it.
+2. Otherwise it finds Python and starts its built-in web server in a minimized window. No Python packages are needed.
+3. If Python is missing, it installs it once with winget.
+4. If that isn't possible, it falls back to `scripts/serve.ps1`, a small server that needs only the PowerShell built into Windows.
+
+It waits until the server answers, then opens the hub in your browser. If port 8765 is taken by another program, it says so instead of opening the wrong page.
+
+**`stop.bat`** stops the hub server, whichever kind is running, and leaves other programs alone. To use another port, `set HUB_PORT=8766` before running either script.
 
 If the controller isn't detected, open the tester. If it shows nothing either, check that Windows sees the controller. Its USB receiver may need to go straight into a laptop port, not a hub.
 
