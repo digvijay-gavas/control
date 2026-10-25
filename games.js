@@ -22,7 +22,7 @@ window.GAMES = [
   },
   {
     id: "gravity-lander",
-    title: "Gravity Lander",
+    title: "Antariksh",
     path: "games/gravity-lander/",
     icon: "🚀",
     color: "#ffb547",

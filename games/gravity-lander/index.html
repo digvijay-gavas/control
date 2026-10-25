@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gravity Lander</title>
+<title>Antariksh</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; }
   canvas { display: block; width: 100vw; height: 100vh; }
@@ -19,7 +19,7 @@
 <script src="lander.js"></script>
 <script src="launcher.js"></script>
 <script>
-// Gravity Lander: land on real worlds with real physics.
+// Antariksh: land on real worlds with real physics.
 //   RT          main engine throttle (analog)
 //   Left stick  assist on: the tilt you want; a PID holds it (assist.js)
 //               assist off: rotation thrusters directly (spin keeps going)
@@ -603,7 +603,7 @@ function flyTo(i) { total = 0; newLevel(i, 0); state = "play"; screen = null; }
 // Choose the mode, then a world (or a mission checkpoint, on mission.html), or settings
 let screen = null;
 function modeScreen() {
-  return { title: "GRAVITY LANDER", sel: 0,
+  return { title: "ANTARIKSH", sel: 0,
     lines: ["Real rocket physics: gravity, air drag, fuel mass that drops as you burn."],
     items: [
       { label: "Landing practice", note: "Land on the Moon, Mars, Titan and Earth", action: () => { screen = worldsScreen(); } },
@@ -632,7 +632,7 @@ function settings(backTo) {
 }
 function screenBack() {
   if (!screen) return;
-  if (screen.title === "GRAVITY LANDER") location.href = "../../";
+  if (screen.title === "ANTARIKSH") location.href = "../../";
   else if (screen.title === "LANDING PRACTICE") screen = modeScreen();
   else screen.items[screen.items.length - 1].action();   // settings: its own Back
 }
@@ -666,7 +666,7 @@ window.addEventListener("keydown", e => {
 
 // ---------- main loop ----------
 Pad.setup({
-  title: "Gravity Lander",
+  title: "Antariksh",
   hubUrl: "../../",
   items: [],
   canOpen: () => false,   // this page has its own menus (launcher.js): start screens and pause

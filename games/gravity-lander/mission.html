@@ -442,12 +442,28 @@ function stage() {
 // range of Luna on the way down ("Ready to land"). Start from any of them later
 // (menu: Choose checkpoint, or D-pad on the title screen).
 const KEY = "orbit-mission-checkpoint";        // the one you're playing from
-const ALL_KEY = "orbit-mission-checkpoints";   // one per assignment reached, then "Ready to land"
+const ALL_KEY = "orbit-mission-checkpoints";   // saved progression through CHECKPOINTS
 const READY = PHASES.length;                   // slot of the "Ready to land" checkpoint
+const COMPLETE = READY + 1;                    // successful touchdown
 let checkpoint = null, checkpoints = [], titleCp = 0;
-const cpName = i => i === READY ? "6+. Ready to land (radar range)" : `${i + 1}. ${PHASES[i].name}`;
+// One ordered definition drives the in-flight checklist and checkpoint picker.
+// Slots 0–5 are the start of each assignment; READY is a mid-descent save and
+// COMPLETE is the successful touchdown save.
+const CHECKPOINTS = [
+  { slot: 0, name: "Terra launch pad", goal: "Begin the mission from Terra." },
+  { slot: 1, name: "Lift off", goal: "Clear Terra's atmosphere." },
+  { slot: 2, name: "Reach orbit", goal: "Establish a stable orbit around Terra." },
+  { slot: 3, name: "Transfer to Luna", goal: "Reach Luna's sphere of influence." },
+  { slot: 4, name: "Get captured", goal: "Enter an orbit contained by Luna's sphere of influence." },
+  { slot: 5, name: "Stable lunar orbit", goal: "Settle into a stable orbit around Luna." },
+  { slot: READY, name: "Ready to land", goal: "Saved when the radar first sees Luna's surface on descent." },
+  { slot: COMPLETE, name: "Lunar touchdown", goal: "Land safely on Luna to complete the mission." },
+];
+const CHECKPOINT_BY_SLOT = Object.fromEntries(CHECKPOINTS.map(cp => [cp.slot, cp]));
+const cpName = i => `${i + 1}. ${CHECKPOINT_BY_SLOT[i].name}`;
 function saveCheckpoint(slot = S.phase < PHASES.length ? S.phase : null) {
   checkpoint = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
+  if (slot === null && S.phase >= PHASES.length && S.landedOn === LUNA) slot = COMPLETE;
   if (slot !== null) checkpoints[slot] = checkpoint;
   try { localStorage.setItem(KEY, JSON.stringify(checkpoint)); localStorage.setItem(ALL_KEY, JSON.stringify(checkpoints)); } catch (e) {}
 }
@@ -474,7 +490,7 @@ function startFrom(i) {
   if (i === 0 || !checkpoints[i]) newMission(); else loadCheckpoint(checkpoints[i]);
   state = "play";
 }
-const SLOTS = [...PHASES.keys(), READY];
+const SLOTS = CHECKPOINTS.map(cp => cp.slot);
 function reached() { return SLOTS.filter(i => checkpoints[i]); }
 function loadSaved() {
   try { checkpoints = JSON.parse(localStorage.getItem(ALL_KEY) || "[]") || []; } catch (e) { checkpoints = []; }
@@ -485,6 +501,7 @@ function loadSaved() {
   // Reaching an assignment means the one before it was completed; phase 6 = all of them
   for (let i = 1; i < PHASES.length; i++) if (checkpoints[i]) for (let j = 0; j < i; j++) done[j] = true;
   if (checkpoint && checkpoint.phase >= PHASES.length) { PHASES.forEach((_, j) => { done[j] = true; }); best = Math.max(best, checkpoint.score || 0); }
+  if (checkpoint && checkpoint.phase >= PHASES.length && checkpoint.landedOn === "Luna" && !checkpoints[COMPLETE]) checkpoints[COMPLETE] = checkpoint;
   if (!checkpoints[0]) checkpoints[0] = JSON.parse(JSON.stringify({ ...S, landedOn: S.landedOn && S.landedOn.name }));
   const r = reached();
   titleCp = checkpoint && checkpoint.readyCp && checkpoints[READY] ? READY
@@ -856,20 +873,22 @@ function row(label, value, y, color) {
 }
 
 function drawHUD(sit) {
-  // Assignment card (left); the checklist goes below however many lines the goal takes
+  // Assignment objective plus the shared checkpoint list (left).
   const ph = PHASES[Math.min(S.phase, PHASES.length - 1)];
   ctx.font = "500 12px system-ui";
   const goalEnd = wrapText(ph.goal, 28, 74, 300, 15, false), listY = goalEnd + 30;
-  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(14, 14, 330, listY - 14 + PHASES.length * 20 - 6, 12); ctx.fill();
+  ctx.fillStyle = "rgba(10,12,18,0.78)"; ctx.beginPath(); ctx.roundRect(14, 14, 330, listY - 14 + CHECKPOINTS.length * 20 - 6, 12); ctx.fill();
   ctx.textAlign = "left";
   ctx.fillStyle = "#ffb547"; ctx.font = "700 12px system-ui"; ctx.fillText(`ASSIGNMENT ${Math.min(S.phase + 1, PHASES.length)} / ${PHASES.length}`, 28, 36);
   ctx.fillStyle = "#fff"; ctx.font = "800 17px system-ui"; ctx.fillText(ph.name, 28, 56);
   ctx.fillStyle = "#c9d1e0"; ctx.font = "500 12px system-ui";
   wrapText(ph.goal, 28, 74, 300, 15);
-  PHASES.forEach((p, i) => {
-    ctx.fillStyle = i < S.phase ? "#3ddc84" : i === S.phase ? "#fff" : "#5c6475";
+  const activeCp = S.landedOn === LUNA ? COMPLETE : S.readyCp || S.phase >= PHASES.length - 1 ? READY : S.phase;
+  CHECKPOINTS.forEach((cp, i) => {
+    const current = cp.slot === activeCp;
+    ctx.fillStyle = cp.slot < activeCp ? "#3ddc84" : current ? "#fff" : "#5c6475";
     ctx.font = "600 12px system-ui";
-    ctx.fillText(`${i < S.phase ? "✓" : i === S.phase ? "▸" : "○"} ${p.name}`, 28, listY + i * 20);
+    ctx.fillText(`${cp.slot < activeCp ? "✓" : current ? "▸" : "○"} ${i + 1}. ${cp.name}`, 28, listY + i * 20);
   });
 
   // Telemetry (right)
@@ -1039,7 +1058,7 @@ function render(p) {
     panel([
       ["Mission lost", 36, "#ff6b5c", 900],
       [S.crashed, 15],
-      [`Checkpoint: ${checkpoint && checkpoint.readyCp ? "Ready to land (radar range)" : PHASES[Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1)].name}`, 15, "#8a92a3"],
+      [`Checkpoint: ${checkpoint && checkpoint.readyCp ? cpName(READY) : checkpoint && checkpoint.phase >= PHASES.length && checkpoint.landedOn === "Luna" ? cpName(COMPLETE) : cpName(Math.min(checkpoint ? checkpoint.phase : 0, PHASES.length - 1))}`, 15, "#8a92a3"],
       ["A: retry from this checkpoint · B: choose a checkpoint", 17, "#3ddc84", 700],
     ]);
   } else if (state === "complete") {
@@ -1058,10 +1077,10 @@ function render(p) {
 let screen = null;
 function checkpointScreen() {
   const items = SLOTS.map(i => {
-    const ph = i === READY ? PHASES.length - 1 : i, have = !!checkpoints[i];
-    const goal = i === READY ? "Saved when the radar first sees Luna's surface on the way down" : PHASES[i].goal.split(". ")[0] + ".";
+    const cp = CHECKPOINT_BY_SLOT[i], have = !!checkpoints[i];
+    const phaseDone = i === 0 ? false : i === READY || i === COMPLETE ? done[PHASES.length - 1] : done[i - 1];
     return have
-      ? { slot: i, label: cpName(i) + (i === 0 ? " (launch pad)" : ""), status: done[ph] ? "done" : "open", value: i === titleCp ? "last played" : done[ph] ? "completed" : "", note: goal, action: () => startFrom(i) }
+      ? { slot: i, label: cpName(i), status: phaseDone ? "done" : "open", value: i === titleCp ? "last played" : phaseDone ? "completed" : "", note: cp.goal, action: () => startFrom(i) }
       : { slot: i, label: cpName(i), status: "locked", note: "Not reached yet" };
   });
   if (done[PHASES.length - 1]) items.push({ label: `Mission complete · best score ${best}`, status: "info" });
